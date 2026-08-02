@@ -1,0 +1,43 @@
+# V1 validation
+
+The implementation is exercised with deterministic models and actual local Docker/MCP infrastructure. No external credentials are required for default tests.
+
+## Reproducible checks
+
+```bash
+bun install --frozen-lockfile
+bun run sandbox:build
+bun run typecheck
+bun run lint
+bun test
+MINICODER_DOCKER_TESTS=1 bun test
+bun run smoke
+bun run check:secrets
+PATH="$PWD/bin:$PATH" agent --help
+```
+
+Default tests cover plan schema/atomic replacement; path canonicalization, traversal and symlink restrictions; command protection/timeouts; output bounds; hard budgets; fallback eligibility/order/pinning; model response validation; official SDK request/usage parsing against local HTTP servers; success transitions; independent verification; checkpoint metadata; regression recovery; repeated actions; JSONL/redaction; context compaction; Ink rendering; MCP cancellation/draining; finalization; and whitespace-safe diff export.
+
+Docker integration adds real tree-sitter symbols, ripgrep, unified patches, non-root/no-network execution, timeout cleanup, host preservation, independent tests, validated checkpoint restore, and successful edits after restore. The fixture smoke uses nine actions through the real agent loop and MCP transport. It fixes subtraction to addition, tests independently, exports a Git-applicable patch, verifies source preservation, and checks trace events. It is not a model benchmark.
+
+Final local results: typecheck and lint passed; 38 tests passed with Docker enabled (36 default tests plus 2 opt-in Docker tests), with no failures. The rebuilt-image fixture smoke returned `SUCCESS` in nine turns with a valid exported patch and unchanged original source. The Git secret audit passed. These counts describe the validation at the V1 implementation milestone, not a benchmark.
+
+## Live provider observations
+
+Live calls were separately opted in after free-only credentials were confirmed. No credential values or private reasoning were printed or committed.
+
+- Gemini `gemini-3.8-flash` accepted the official SDK's structured schema and returned valid plan, read, and edit actions on the tiny fixture. A pinned run encountered repeated HTTP 503 responses and terminated as `MODEL_UNAVAILABLE` before final verification. This demonstrates the adapter/action path but does not establish a completed live Gemini smoke run.
+- FreeLLMAPI `kimi-k2.7-code` and `deepseek-v4-flash` were called with explicit IDs. Both endpoint/model requests returned HTTP 503 during pinned tests; neither pinned test changed models.
+- A controlled availability test omitted the Gemini credential, selected Kimi, then DeepSeek after bounded retries, and ended with `MODEL_UNAVAILABLE` and two recorded fallback transitions. Provider unavailability was never treated as successful coding.
+- Some live setup attempts received Docker's missing-image response; direct inspection and subsequent Docker integration/fixture runs succeeded. The final image is built locally from the repository. `bun run sandbox:build` is the recovery step if a selected Docker context lacks the image.
+
+The SDK/compatible HTTP protocols and fallback policy pass local deterministic tests. Completed live inference runs remain subject to provider availability and quotas; V1 does not claim these unavailable live tests passed. Retry with:
+
+```bash
+MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts gemini
+MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts kimi
+MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts deepseek
+MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts fallback
+```
+
+Each prints a retained diagnostic/artifact path and checks original source preservation. No unsupported performance or task-success benchmark is reported.

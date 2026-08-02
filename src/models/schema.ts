@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { PlanSchema } from "../runtime/types";
 export const toolSchemas = {
   list_tree: z
@@ -55,13 +56,13 @@ export const ActionSchema = z
   });
 export type Action = z.infer<typeof ActionSchema>;
 export const actionJsonSchema = {
-  type: "object",
-  required: ["tool", "arguments"],
-  additionalProperties: false,
-  properties: {
-    tool: { type: "string", enum: Object.keys(toolSchemas) },
-    arguments: { type: "object" },
-  },
+  anyOf: (Object.keys(toolSchemas) as ToolName[]).map((tool) => {
+    const { $schema: _schema, ...schema } = zodToJsonSchema(
+      z.object({ tool: z.enum([tool]), arguments: toolSchemas[tool] }).strict(),
+      { $refStrategy: "none" },
+    );
+    return schema;
+  }),
 };
 // One typed action per model turn. Tool arguments are validated before dispatch.
 export const TOOL_HELP = `list_tree {path?,maxEntries?}; read_file {path,startLine?,endLine?}; ripgrep {pattern,path?,maxMatches?}; tree_sitter_symbols {path}; edit_file {path,patch} (single-file unified diff, include --- a/path and +++ b/path); run_shell {command,cwd?,timeoutMs?}; git {operation:status|diff|log|show,revision?}; update_plan {plan:[{id,content,status:pending|in_progress|done,notes?}]}; request_completion {summary}. No other argument keys. Paths relative to /workspace.`;

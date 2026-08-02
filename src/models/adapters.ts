@@ -57,8 +57,10 @@ export class GeminiAdapter implements ModelAdapter {
     public contextLimit: number,
     apiKey?: string,
     private timeoutMs = 120000,
+    client?: GoogleGenAI,
   ) {
-    if (apiKey) this.client = new GoogleGenAI({ apiKey });
+    if (client) this.client = client;
+    else if (apiKey) this.client = new GoogleGenAI({ apiKey });
   }
   async generate(
     context: string,
@@ -75,7 +77,7 @@ export class GeminiAdapter implements ModelAdapter {
           responseJsonSchema: actionJsonSchema,
           maxOutputTokens,
           abortSignal: signal,
-          httpOptions: { timeout: this.timeoutMs },
+          httpOptions: { timeout: this.timeoutMs, retryOptions: { attempts: 1 } },
         },
       });
       return decode(
@@ -207,7 +209,7 @@ export class ModelChain {
           });
           if (!failure.eligible) throw new RunError("MODEL_UNAVAILABLE", failure.message);
           if (!failure.transient || retry === this.config.retries) break;
-          await this.sleep(250 * 2 ** retry, signal);
+          await this.sleep(1000 * 2 ** retry, signal);
         }
       }
       if (!this.config.fallback || this.index + 1 >= this.adapters.length)

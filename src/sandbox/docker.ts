@@ -221,9 +221,16 @@ export class DockerSandbox implements Sandbox {
   }
   async cleanup(): Promise<void> {
     this.closing = true;
-    for (const name of this.active) await this.docker(["rm", "-f", name], { timeoutMs: 10000 });
+    const failures: string[] = [];
+    const remove = async (args: string[]) => {
+      const r = await this.docker(args, { timeoutMs: 10000 });
+      if (r.exitCode !== 0 && !/No such|not found|does not exist/i.test(r.stderr))
+        failures.push(r.stderr.slice(-1000));
+    };
+    for (const name of this.active) await remove(["rm", "-f", name]);
     this.active.clear();
-    for (const name of [this.workspace, this.control])
-      await this.docker(["volume", "rm", "-f", name], { timeoutMs: 10000 });
+    for (const name of [this.workspace, this.control]) await remove(["volume", "rm", "-f", name]);
+    if (failures.length)
+      throw new RunError("SANDBOX_ERROR", `Sandbox cleanup failed: ${failures.join("; ")}`);
   }
 }

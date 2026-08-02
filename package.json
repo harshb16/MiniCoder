@@ -19,11 +19,12 @@
     "@google/genai": "latest",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ink": "latest",
-    "react": "latest",
     "openai": "latest",
-    "zod": "^3.25.76",
+    "react": "latest",
+    "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "0.20.8",
-    "tree-sitter-wasms": "^0.1.13"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.1"
   },
   "devDependencies": {
     "@biomejs/biome": "latest",

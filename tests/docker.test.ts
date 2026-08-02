@@ -53,3 +53,67 @@ dockerTest(
   },
   120000,
 );
+
+dockerTest(
+  "Docker checkpoint restore and independent regression verification",
+  async () => {
+    const { Trace } = await import("../src/runtime/trace");
+    const { Checkpoints } = await import("../src/runtime/checkpoints");
+    const { Verifier } = await import("../src/runtime/verifier");
+    const { state } = await import("./helpers");
+    const dir = await mkdtemp(join(tmpdir(), "mini-recovery-"));
+    const source = join(dir, "repo");
+    await cp(join(import.meta.dir, "../fixtures/tiny"), source, { recursive: true });
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      join(source, "math.ts"),
+      "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+    );
+    const sandbox = new DockerSandbox(loadConfig({}, { commandTimeoutMs: 10000 }));
+    const signal = new AbortController().signal;
+    const trace = new Trace(join(dir, "run"));
+    await trace.init({});
+    const s = state();
+    try {
+      await sandbox.initialize(source, signal);
+      const points = new Checkpoints(sandbox, s, trace);
+      await points.initialize(signal);
+      const verifier = new Verifier(
+        sandbox,
+        points,
+        { commands: ["bun test"], source: "configured" },
+        trace,
+        10000,
+      );
+      expect((await verifier.verify(signal)).passed).toBe(true);
+      const validated = await points.snapshot("validated", signal);
+      await points.snapshot("operational", signal);
+      await sandbox.tool(
+        "edit_file",
+        {
+          path: "math.ts",
+          patch:
+            "--- a/math.ts\n+++ b/math.ts\n@@ -1,3 +1,3 @@\n export function add(a: number, b: number): number {\n-  return a + b;\n+  return a - b;\n }\n",
+        },
+        signal,
+      );
+      expect((await verifier.verify(signal)).passed).toBe(false);
+      await points.restore(validated, signal);
+      expect((await verifier.verify(signal)).passed).toBe(true);
+      await sandbox.tool(
+        "edit_file",
+        {
+          path: "math.ts",
+          patch:
+            "--- a/math.ts\n+++ b/math.ts\n@@ -1,3 +1,3 @@\n export function add(a: number, b: number): number {\n-  return a + b;\n+  return a + b + 0;\n }\n",
+        },
+        signal,
+      );
+      expect((await verifier.verify(signal)).passed).toBe(true);
+    } finally {
+      await sandbox.cleanup();
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+  120000,
+);

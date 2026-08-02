@@ -20,13 +20,19 @@ export class ProviderError extends Error {
     public eligible: boolean,
     public transient: boolean,
     message: string,
+    public retryAfterMs?: number,
   ) {
     super(message);
   }
 }
 export function classifyProviderError(error: unknown): ProviderError {
   if (error instanceof ProviderError) return error;
-  const e = error as { status?: number; code?: string; name?: string };
+  const e = error as {
+    status?: number;
+    code?: string;
+    name?: string;
+    headers?: { get(name: string): string | null };
+  };
   const status = e?.status;
   const eligible =
     status === 404 ||
@@ -40,7 +46,14 @@ export function classifyProviderError(error: unknown): ProviderError {
     eligible,
     eligible && status !== 404,
     `Provider request failed${status ? ` (HTTP ${status})` : ""}`,
+    retryAfter(e?.headers?.get?.("retry-after")),
   );
+}
+export function retryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now;
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(Math.ceil(ms), 60000) : undefined;
 }
 function decode(text: string | undefined, inputTokens = 0, outputTokens = 0): ModelResult {
   try {
@@ -212,10 +225,13 @@ export class ModelChain {
             eligible: failure.eligible,
             code: failure.transient ? "MODEL_TRANSIENT_ERROR" : "MODEL_UNAVAILABLE",
             message: failure.message,
+            retryAfterMs: failure.retryAfterMs,
           });
           if (!failure.eligible) throw new RunError("MODEL_UNAVAILABLE", failure.message);
           if (!failure.transient || retry === this.config.retries) break;
-          await this.sleep(1000 * 2 ** retry, signal);
+          const delayMs = Math.max(1000 * 2 ** retry, failure.retryAfterMs ?? 0);
+          await this.notify("model_retry", { model: this.current.id, delayMs });
+          await this.sleep(delayMs, signal);
         }
       }
       if (!this.config.fallback || this.index + 1 >= this.adapters.length)

@@ -27,7 +27,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     });
     if (parsed.values.help) {
       console.log(
-        'MiniCoder V1\nUsage: agent run <repo> "<task>" [--model gemini|kimi|deepseek] [--max-turns 50] [--timeout 900] [--network none|enabled] [--non-interactive] [--benchmark] [--artifact-dir <dir>]',
+        'MiniCoder V1\nUsage: agent run <repo> "<task>" [--model gemini|qwen|deepseek] [--max-turns 50] [--timeout 900] [--network none|enabled] [--non-interactive] [--benchmark] [--artifact-dir <dir>]',
       );
       return 0;
     }
@@ -40,7 +40,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         (x) => x.key === parsed.values.model || x.id === parsed.values.model,
       );
       if (!model)
-        throw new Error("Unknown model: select gemini, kimi, deepseek or a configured model ID");
+        throw new Error("Unknown model: select gemini, qwen, deepseek or a configured model ID");
       config.model = model.key;
       config.fallback = false;
     }

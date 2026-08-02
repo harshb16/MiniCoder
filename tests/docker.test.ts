@@ -34,9 +34,22 @@ dockerTest(
         ),
       ).rejects.toThrow();
       const patch =
-        "--- a/math.ts\n+++ b/math.ts\n@@ -1,3 +1,3 @@\n export function add(a: number, b: number): number {\n-  return a - b;\n+  return a + b;\n }\n";
+        "--- a/math.ts\n+++ b/math.ts\n@@ -1,3 +1,3 @@\n export function add(a: number, b: number): number {\n-  return a - b;\n+  return a + b;\n }";
       await sandbox.tool("edit_file", { path: "math.ts", patch }, signal);
       expect(await readFile(join(dir, "math.ts"), "utf8")).toContain("a - b");
+      await sandbox.tool(
+        "edit_file",
+        {
+          path: "math.ts",
+          patch:
+            "--- a/math.ts\n+++ b/math.ts\n@@ -1,3 +1,3 @@\n export function add(a: number, b: number): number {\n   return a + b;\n-}\n+}\n\\ No newline at end of file",
+        },
+        signal,
+      );
+      const read = (await sandbox.tool("read_file", { path: "math.ts" }, signal)) as {
+        totalLines: number;
+      };
+      expect(read.totalLines).toBe(3);
       const result = await sandbox.shell("bun test", 10000, signal);
       expect(result.exitCode).toBe(0);
       const r = await sandbox.shell("sleep 30 & wait", 50, signal);

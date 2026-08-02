@@ -47,8 +47,8 @@ GEMINI_API_KEY=<your free-tier key>
 GEMINI_MODEL=gemini-3.8-flash
 FREELLMAPI_BASE_URL=<your free-only OpenAI-compatible endpoint, including /v1 if required>
 FREELLMAPI_API_KEY=<your endpoint key>
-FREELLMAPI_KIMI_MODEL=kimi-k2.7-code
-FREELLMAPI_DEEPSEEK_MODEL=deepseek-v4-flash
+FREELLMAPI_QWEN_MODEL=qwen3.7-flash
+FREELLMAPI_DEEPSEEK_MODEL=deepseek-v4-flash-0731
 MINICODER_FREE_ONLY=true
 MINICODER_FREE_TIER_CONFIRMED=true
 ```
@@ -59,12 +59,12 @@ Default chain:
 
 ```text
 Gemini gemini-3.8-flash
-  -> FreeLLMAPI kimi-k2.7-code
-  -> FreeLLMAPI deepseek-v4-flash
+  -> FreeLLMAPI qwen3.7-flash
+  -> FreeLLMAPI deepseek-v4-flash-0731
   -> MODEL_UNAVAILABLE
 ```
 
-Each transient availability failure gets two retries with exponential backoff. Quota/rate limits, HTTP 408/429/5xx, model unavailability (404), and retryable connection failures can advance the chain. Authentication/configuration errors do not switch providers. An invalid coding action or a failed test never causes fallback. Missing provider credentials mark that provider unavailable. Once fallback occurs, later turns stay on the selected provider.
+Each transient availability failure gets two retries with exponential backoff. A provider's `Retry-After` delay is honored up to 60 seconds per retry, within the run's wall-clock budget; cancellation interrupts the wait. Quota/rate limits, HTTP 408/429/5xx, model unavailability (404), and retryable connection failures can advance the chain. Authentication/configuration errors do not switch providers. An invalid coding action or a failed test never causes fallback. Missing provider credentials mark that provider unavailable. Once fallback occurs, later turns stay on the selected provider.
 
 Any `--model` selection pins that model and disables fallback, including `--model gemini`. `--benchmark` also disables fallback. SDK-internal retries are disabled so retries remain controlled and observable.
 
@@ -103,7 +103,7 @@ Environment overrides:
 | `MINICODER_MAX_TOKENS` | `2000000` | Aggregate model token limit |
 | `MINICODER_SANDBOX_IMAGE` | `minicoder-sandbox:v1` | Local image containing the worker |
 | `GEMINI_CONTEXT_LIMIT` | `1048576` | Gemini context ceiling |
-| `KIMI_CONTEXT_LIMIT` | `262144` | Kimi context ceiling |
+| `QWEN_CONTEXT_LIMIT` | `262144` | Qwen context ceiling |
 | `DEEPSEEK_CONTEXT_LIMIT` | `1048576` | DeepSeek context ceiling |
 
 Context ceilings are configurable deployment limits; confirm them against your endpoint's supported model limits. CLI limits override environment limits. `--artifact-dir` selects an output root outside the source repository.
@@ -178,12 +178,16 @@ Opt-in live tests require confirmed free-only credentials:
 
 ```bash
 MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts gemini
-MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts kimi
+MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts qwen
 MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts deepseek
 MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts fallback
 ```
 
-The fallback test deliberately omits the Gemini credential for that test process, then follows the configured Kimi/DeepSeek availability chain. Pinned tests never switch models. These tests keep diagnostics and check that fixture source stays unchanged.
+The fallback test deliberately omits the Gemini credential for that test process, then follows the configured Qwen/DeepSeek availability chain. Pinned tests never switch models. These tests keep diagnostics and check that fixture source stays unchanged.
+
+The configured FreeLLMAPI endpoint advertises `qwen3.7-flash` and `deepseek-v4-flash-0731` as its model IDs. The display-style identifier `deepseek/deepseek-v4-flash-0731free` returned HTTP 404 there. Use the advertised ID, or override `FREELLMAPI_DEEPSEEK_MODEL` if your endpoint requires a different exact ID.
+
+For endpoints with a low request rate, allow a longer live fixture budget: `MINICODER_TIMEOUT_MS=900000 MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts qwen`. The script defaults to five minutes when no timeout environment override is supplied. A FreeLLMAPI access key does not configure upstream providers: a "No candidate model has a configured, usable provider key" error requires the appropriate provider key in your endpoint's dashboard.
 
 ## Security model and V1 status
 
@@ -191,7 +195,7 @@ Autonomous commands use fresh non-root containers: 2 CPUs, 1 GB RAM, 128 PIDs, r
 
 **Docker is a local isolation boundary, not perfect security. MiniCoder is not production-secure.** Kernel/daemon vulnerabilities, malicious dependencies, excessive disk use, and network exfiltration when explicitly enabled remain risks. CPU/RAM/PID/time limits are enforced, but Docker volumes have no V1 disk quota. Known secret/config paths and generated directories are excluded from source copying; source symlinks/submodules and special files are rejected. Some projects therefore need a prepared ordinary-file checkout or a derived image.
 
-V1 implements the complete local workflow and passes deterministic/unit, protocol, Docker recovery, and end-to-end fixture checks. Live Gemini produced valid coding actions; live provider checks also encountered HTTP 503 outages. An unavailable provider is reported honestly, never treated as a successful run. See [validation notes](docs/validation.md) for the exact observed outcomes. There are no performance or benchmark claims.
+V1 implements the complete local workflow and passes deterministic/unit, protocol, Docker recovery, and end-to-end fixture checks. Live Gemini and Qwen produced valid coding actions, but their coding fixtures did not complete: Gemini encountered HTTP 503 and Qwen exhausted HTTP 429 retries. The refreshed DeepSeek route returned HTTP 503 indicating a missing usable upstream provider key. An unavailable provider is reported honestly, never treated as a successful run. See [validation notes](docs/validation.md) for the exact observed outcomes. There are no performance or benchmark claims.
 
 Verification proves configured checks and runtime policy, not semantic correctness of every natural-language task. Tests remain editable source; a task-specific trusted acceptance command is strongly preferable. Command blocking is defense in depth and not a shell parser or security boundary. Ordinary Docker copy limits and artifact caps bound some I/O but do not replace filesystem quotas.
 

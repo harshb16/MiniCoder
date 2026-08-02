@@ -7,13 +7,13 @@ import { createAdapters } from "../src/models/adapters";
 import { processRun } from "../src/sandbox/process";
 
 const selector = process.argv[2] ?? "gemini";
-if (!["gemini", "kimi", "deepseek", "fallback"].includes(selector))
-  throw new Error("Select gemini, kimi, deepseek, or fallback");
+if (!["gemini", "qwen", "deepseek", "fallback"].includes(selector))
+  throw new Error("Select gemini, qwen, deepseek, or fallback");
 const config = loadConfig(process.env, {
-  model: selector === "kimi" ? "kimi" : selector === "deepseek" ? "deepseek" : "gemini",
+  model: selector === "qwen" ? "qwen" : selector === "deepseek" ? "deepseek" : "gemini",
   fallback: selector === "fallback",
   maxTurns: 20,
-  timeoutMs: 300000,
+  ...(!process.env.MINICODER_TIMEOUT_MS ? { timeoutMs: 300000 } : {}),
   commandTimeoutMs: 10000,
 });
 const root = await mkdtemp(join(tmpdir(), "minicoder-live-"));

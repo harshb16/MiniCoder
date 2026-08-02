@@ -84,9 +84,11 @@ Failures in tools become bounded structured tool evidence. Invalid model respons
 
 ## Model chain and cost contract
 
-Default fixed order: Gemini `gemini-3.8-flash`, Kimi `kimi-k2.7-code`, DeepSeek `deepseek-v4-flash`. Each ID has an environment override. Only these two providers exist in V1; fallback adapters never ask FreeLLMAPI to route automatically.
+Default fixed order: Gemini `gemini-3.8-flash`, Qwen `qwen3.7-flash`, DeepSeek `deepseek-v4-flash-0731`. Each ID has an environment override. Only these two providers exist in V1; fallback adapters never ask FreeLLMAPI to route automatically.
 
 Each availability error gets a bounded number of runtime retries (two), with exponential delays. Missing credentials/model endpoints can move directly to the next provider; 408/429/5xx and selected connection failures are retryable. 401/403 and invalid requests stop without fallback. Invalid model JSON becomes `MODEL_RESPONSE_INVALID`, not an availability error. Gemini and OpenAI SDK internal retries are explicitly disabled.
+
+`Retry-After` supports delay seconds and HTTP dates. The runtime waits for the larger of its exponential delay and the advertised cooldown, capped at 60 seconds; run cancellation and the wall-clock timer still interrupt that wait. Retry delays are traced as `model_retry` events. No retry parses provider prose to decide how long to wait.
 
 Model selection is sticky after fallback. Any CLI `--model`, or `--benchmark`, disables fallback. Context uses the smallest model ceiling while fallback is enabled. Provider metadata records tokens where possible; missing metadata uses conservative estimates, including output reservation. Invalid responses retain available usage metadata. Provider errors with no usage metadata cannot reveal actual token consumption; attempts, wall time, turns, and timeouts remain hard bounded.
 

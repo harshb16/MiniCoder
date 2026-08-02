@@ -19,9 +19,9 @@ export interface Config {
   bootstrapNetwork: boolean;
   image: string;
   fallback: boolean;
-  model: "gemini" | "kimi" | "deepseek";
+  model: "gemini" | "qwen" | "deepseek";
   freeTierConfirmed: boolean;
-  models: { key: "gemini" | "kimi" | "deepseek"; id: string; contextLimit: number }[];
+  models: { key: "gemini" | "qwen" | "deepseek"; id: string; contextLimit: number }[];
 }
 function positive(value: string | undefined, defaultValue: number): number {
   const n = value === undefined ? defaultValue : Number(value);
@@ -53,13 +53,13 @@ export function loadConfig(env = process.env, overrides: Partial<Config> = {}): 
         contextLimit: positive(env.GEMINI_CONTEXT_LIMIT, 1048576),
       },
       {
-        key: "kimi",
-        id: env.FREELLMAPI_KIMI_MODEL || "kimi-k2.7-code",
-        contextLimit: positive(env.KIMI_CONTEXT_LIMIT, 262144),
+        key: "qwen",
+        id: env.FREELLMAPI_QWEN_MODEL || "qwen3.7-flash",
+        contextLimit: positive(env.QWEN_CONTEXT_LIMIT, 262144),
       },
       {
         key: "deepseek",
-        id: env.FREELLMAPI_DEEPSEEK_MODEL || "deepseek-v4-flash",
+        id: env.FREELLMAPI_DEEPSEEK_MODEL || "deepseek-v4-flash-0731",
         contextLimit: positive(env.DEEPSEEK_CONTEXT_LIMIT, 1048576),
       },
     ],
@@ -74,7 +74,7 @@ export function loadConfig(env = process.env, overrides: Partial<Config> = {}): 
     c.outputChars,
   ])
     if (!Number.isSafeInteger(n) || n <= 0) throw new Error("Invalid runtime limit");
-  if (!["gemini", "kimi", "deepseek"].includes(c.model))
+  if (!["gemini", "qwen", "deepseek"].includes(c.model))
     throw new Error("Unsupported model selector");
   if (c.model !== "gemini") c.fallback = false;
   return c;

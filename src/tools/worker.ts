@@ -38,6 +38,8 @@ export async function patchFile(path: string, patch: string): Promise<unknown> {
   const full = await workspacePath(ROOT, path, true);
   const rel = relative(ROOT, full);
   if (!rel) throw new RunError("TOOL_ERROR", "Cannot edit workspace root");
+  // The diff's terminator is distinct from the target file's newline markers.
+  if (!patch.endsWith("\n")) patch += "\n";
   const lines = patch.split("\n");
   const oldHeaders = lines.filter((x) => x.startsWith("--- "));
   const newHeaders = lines.filter((x) => x.startsWith("+++ "));

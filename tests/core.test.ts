@@ -154,11 +154,28 @@ describe("core invariants", () => {
   test("fixed default ordering and free-only guard", () => {
     expect(loadConfig({}).models.map((x) => x.id)).toEqual([
       "gemini-3.8-flash",
-      "kimi-k2.7-code",
-      "deepseek-v4-flash",
+      "qwen3.7-flash",
+      "deepseek-v4-flash-0731",
     ]);
     expect(() => loadConfig({ MINICODER_FREE_ONLY: "false" })).toThrow();
-    expect(loadConfig({}, { model: "kimi" }).fallback).toBe(false);
+    expect(loadConfig({}, { model: "qwen" }).fallback).toBe(false);
+  });
+  test("FreeLLMAPI IDs and context limits are configurable for pinned models", () => {
+    const config = loadConfig(
+      {
+        FREELLMAPI_QWEN_MODEL: "custom-qwen",
+        FREELLMAPI_DEEPSEEK_MODEL: "deepseek/custom-free",
+        QWEN_CONTEXT_LIMIT: "64000",
+        DEEPSEEK_CONTEXT_LIMIT: "128000",
+      },
+      { model: "qwen" },
+    );
+    expect(config.models.map(({ key, id, contextLimit }) => ({ key, id, contextLimit }))).toEqual([
+      { key: "gemini", id: "gemini-3.8-flash", contextLimit: 1048576 },
+      { key: "qwen", id: "custom-qwen", contextLimit: 64000 },
+      { key: "deepseek", id: "deepseek/custom-free", contextLimit: 128000 },
+    ]);
+    expect(config.fallback).toBe(false);
   });
 });
 describe("provider chain", () => {
@@ -184,7 +201,7 @@ describe("provider chain", () => {
     const c = new ModelChain(
       [
         adapter("gemini", new ProviderError(true, true, "quota")),
-        adapter("kimi", new ProviderError(true, false, "missing")),
+        adapter("qwen", new ProviderError(true, false, "missing")),
         adapter("deepseek"),
       ],
       { model: "gemini", fallback: true, retries: 2 },
@@ -192,12 +209,12 @@ describe("provider chain", () => {
       async () => {},
     );
     await c.generate("context", new AbortController().signal, 100);
-    expect(calls).toEqual(["gemini", "gemini", "gemini", "kimi", "deepseek"]);
+    expect(calls).toEqual(["gemini", "gemini", "gemini", "qwen", "deepseek"]);
   });
   test("ineligible errors do not fall back", async () => {
     calls.length = 0;
     const c = new ModelChain(
-      [adapter("gemini", new ProviderError(false, false, "auth")), adapter("kimi")],
+      [adapter("gemini", new ProviderError(false, false, "auth")), adapter("qwen")],
       { model: "gemini", fallback: true, retries: 0 },
     );
     await expect(c.generate("", new AbortController().signal, 100)).rejects.toThrow();
@@ -206,7 +223,7 @@ describe("provider chain", () => {
   test("benchmark pin disables fallback", async () => {
     calls.length = 0;
     const c = new ModelChain(
-      [adapter("gemini", new ProviderError(true, false, "missing")), adapter("kimi")],
+      [adapter("gemini", new ProviderError(true, false, "missing")), adapter("qwen")],
       { model: "gemini", fallback: false, retries: 0 },
     );
     await expect(c.generate("", new AbortController().signal, 100)).rejects.toThrow();

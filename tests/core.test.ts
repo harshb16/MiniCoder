@@ -213,3 +213,56 @@ describe("provider chain", () => {
     expect(calls).toEqual(["gemini"]);
   });
 });
+
+test("structured compaction survives repeated cycles and preserves failure evidence", async () => {
+  const s = state();
+  s.task = "fix preserved task";
+  s.plan = [
+    {
+      id: "fix",
+      content: "Resolve failure",
+      status: "in_progress",
+      notes: "suspect boundary condition",
+    },
+  ];
+  const context = new ContextManager(s, new Hooks());
+  for (let cycle = 0; cycle < 4; cycle++) {
+    for (let i = 0; i < 12; i++)
+      context.add({
+        tool: "run_shell",
+        arguments: { command: "bun test" },
+        output: JSON.stringify({
+          exitCode: 1,
+          stderr: "boundary assertion failed",
+          padding: "x".repeat(2000),
+        }),
+      });
+    const prompt = await context.build(12000, 100);
+    expect(prompt).toContain("fix preserved task");
+    expect(prompt).toContain("suspect boundary condition");
+    const summary = JSON.parse(s.context.summary);
+    expect(summary.unresolvedEvidence.length).toBeGreaterThan(0);
+    expect(s.context.estimatedTokens).toBeLessThan(10800);
+  }
+});
+test("tracing does not corrupt token-related code and rejects credential patches", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mini-secret-"));
+  try {
+    const trace = new Trace(dir, ["known-test-secret"]);
+    await trace.init({});
+    const patch = "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-token=old\n+token=new\n";
+    await trace.finalPatch(patch);
+    expect(await readFile(join(dir, "final.patch"), "utf8")).toBe(patch);
+    await expect(trace.finalPatch("known-test-secret")).rejects.toThrow();
+    await trace.event("test", { apiKey: "some-secret", tokenCount: 3 });
+    const event = JSON.parse((await readFile(join(dir, "events.jsonl"), "utf8")).trim());
+    expect(event.data.apiKey).toBe("<REDACTED>");
+    expect(event.data.tokenCount).toBe(3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("output bounds remain valid for tiny limits", () => {
+  expect(boundOutput("x".repeat(1000), 20).text.length).toBeLessThanOrEqual(20);
+});

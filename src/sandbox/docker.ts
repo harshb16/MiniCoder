@@ -69,10 +69,10 @@ export class DockerSandbox implements Sandbox {
     this.must(
       await this.container(["chown", "-R", "1000:1000", "/workspace"], { root: true, signal }),
     );
-    this.must(await this.git(["init"]));
-    this.must(await this.git(["config", "user.name", "MiniCoder runtime"]));
-    this.must(await this.git(["config", "user.email", "runtime@minicoder.local"]));
-    this.must(await this.git(["config", "core.hooksPath", "/dev/null"]));
+    this.must(await this.git(["init"], signal));
+    this.must(await this.git(["config", "user.name", "MiniCoder runtime"], signal));
+    this.must(await this.git(["config", "user.email", "runtime@minicoder.local"], signal));
+    this.must(await this.git(["config", "core.hooksPath", "/dev/null"], signal));
     // Runtime index excludes generated content even if the model changes .gitignore.
     this.must(
       await this.container(

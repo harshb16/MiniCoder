@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { runAgent } from "../src/agent/orchestrator";
 import { loadConfig } from "../src/config";
 import type { ModelAdapter } from "../src/models/adapters";
+import type { Action } from "../src/models/schema";
 import { Checkpoints } from "../src/runtime/checkpoints";
 import { Hooks } from "../src/runtime/hooks";
 import { RecoveryPolicy } from "../src/runtime/recovery";
@@ -137,16 +138,7 @@ test("completion cannot bypass verifier; failed verification returns to agent an
   const { root, repo } = await inputRepo();
   const sandbox = new FakeSandbox();
   sandbox.testPass = false;
-  const adapter: ModelAdapter = {
-    key: "gemini",
-    id: "test",
-    contextLimit: 32000,
-    generate: async () => ({
-      action: { tool: "request_completion", arguments: { summary: "I am done" } },
-      inputTokens: 10,
-      outputTokens: 10,
-    }),
-  };
+  const adapter = completionModel("done");
   try {
     const result = await runAgent({
       repo,
@@ -218,5 +210,94 @@ test("artifacts cannot be placed inside the original repository", async () => {
     ).rejects.toThrow("outside");
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("verifier pass is the only successful loop exit and metrics are persisted", async () => {
+  const { root, repo } = await inputRepo();
+  const sandbox = new FakeSandbox();
+  const adapter = completionModel("done");
+  try {
+    const result = await runAgent({
+      repo,
+      task: "fix",
+      config: loadConfig({}, { fallback: false }),
+      artifactRoot: join(root, "runs"),
+      sandbox,
+      adapters: [adapter],
+    });
+    expect(result.status).toBe("SUCCESS");
+    expect(result.verification?.passed).toBe(true);
+    expect(result.checkpoints.validated?.kind).toBe("validated");
+    expect(result.checkpoints.currentTree).toBe("a".repeat(40));
+    const report = JSON.parse(await readFile(join(result.artifacts, "report.json"), "utf8"));
+    expect(report.modelCalls).toBe(2);
+    expect(report.inputTokens).toBe(20);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("completion with an unfinished plan cannot start final verification", async () => {
+  const { root, repo } = await inputRepo();
+  const sandbox = new FakeSandbox();
+  const adapter = completionModel("pending");
+  try {
+    const result = await runAgent({
+      repo,
+      task: "fix",
+      config: loadConfig({}, { fallback: false, maxTurns: 2 }),
+      artifactRoot: join(root, "runs"),
+      sandbox,
+      adapters: [adapter],
+    });
+    expect(result.status).toBe("BUDGET_EXHAUSTED");
+    const events = (await readFile(join(result.artifacts, "events.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((x) => JSON.parse(x));
+    expect(events.filter((x) => x.type === "verification").length).toBe(1);
+    expect(events.some((x) => x.type === "tool_result" && x.data.failed)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function completionModel(status: "pending" | "done"): ModelAdapter {
+  let planned = false;
+  return {
+    key: "gemini",
+    id: "test",
+    contextLimit: 32000,
+    generate: async () => {
+      const action: Action = planned
+        ? { tool: "request_completion", arguments: { summary: "I am done" } }
+        : {
+            tool: "update_plan",
+            arguments: { plan: [{ id: "fix", content: "Fix arithmetic", status }] },
+          };
+      planned = true;
+      return { action, inputTokens: 10, outputTokens: 5 };
+    },
+  };
+}
+
+test("diff preserves meaningful trailing whitespace and NUL-delimited filenames", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mini-diff-"));
+  try {
+    const trace = new Trace(dir);
+    await trace.init({});
+    const sandbox = new FakeSandbox();
+    const patch =
+      "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n-old\n+new\n \n";
+    sandbox.git = async (args) =>
+      args[0] === "diff"
+        ? ok(args.includes("--name-only") ? " file \0" : patch)
+        : ok("a".repeat(40));
+    const cp = new Checkpoints(sandbox, state(), trace);
+    cp.baseline = "a".repeat(40);
+    expect(await cp.diff()).toBe(patch);
+    expect(await cp.changed()).toEqual([" file "]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

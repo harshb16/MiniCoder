@@ -35,6 +35,7 @@ export class ContextManager {
         modified: this.state.modified,
         inspected: this.state.inspected,
         checkpoint: this.state.checkpoints.current,
+        currentTree: this.state.checkpoints.currentTree,
       },
       progress: {
         turn: this.state.turn,

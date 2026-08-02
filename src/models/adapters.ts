@@ -46,7 +46,12 @@ function decode(text: string | undefined, inputTokens = 0, outputTokens = 0): Mo
   try {
     return { action: ActionSchema.parse(JSON.parse(text ?? "")), inputTokens, outputTokens };
   } catch {
-    throw new RunError("MODEL_RESPONSE_INVALID", "Provider returned an invalid typed action");
+    const error = new RunError(
+      "MODEL_RESPONSE_INVALID",
+      "Provider returned an invalid typed action",
+    );
+    error.usage = { inputTokens, outputTokens };
+    throw error;
   }
 }
 export class GeminiAdapter implements ModelAdapter {
@@ -60,7 +65,7 @@ export class GeminiAdapter implements ModelAdapter {
     client?: GoogleGenAI,
   ) {
     if (client) this.client = client;
-    else if (apiKey) this.client = new GoogleGenAI({ apiKey });
+    else if (apiKey) this.client = new GoogleGenAI({ apiKey, vertexai: false });
   }
   async generate(
     context: string,
@@ -205,6 +210,7 @@ export class ModelChain {
           await this.notify("provider_failure", {
             model: this.current.id,
             eligible: failure.eligible,
+            code: failure.transient ? "MODEL_TRANSIENT_ERROR" : "MODEL_UNAVAILABLE",
             message: failure.message,
           });
           if (!failure.eligible) throw new RunError("MODEL_UNAVAILABLE", failure.message);

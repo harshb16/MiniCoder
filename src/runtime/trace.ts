@@ -74,12 +74,14 @@ export class Trace {
 }
 export function boundOutput(value: string, maxChars = 16000): { text: string; omitted: number } {
   if (value.length <= maxChars) return { text: value, omitted: 0 };
-  const reserve = 160;
-  const head = Math.floor((maxChars - reserve) * 0.65);
-  const tail = maxChars - reserve - head;
-  const omitted = value.length - head - tail;
+  const omittedMinimum = Math.max(0, value.length - maxChars);
+  const marker = `\n[OUTPUT_TRUNCATED: at least ${omittedMinimum} characters omitted; narrow reads/search. Raw output retained in artifacts.]\n`;
+  if (maxChars <= marker.length)
+    return { text: marker.slice(0, Math.max(0, maxChars)), omitted: value.length };
+  const head = Math.floor((maxChars - marker.length) * 0.65);
+  const tail = maxChars - marker.length - head;
   return {
-    text: `${value.slice(0, head)}\n[OUTPUT_TRUNCATED: ${omitted} characters omitted; use narrower reads/search. Raw output retained in artifacts.]\n${value.slice(-tail)}`,
-    omitted,
+    text: `${value.slice(0, head)}${marker}${value.slice(-tail)}`,
+    omitted: value.length - head - tail,
   };
 }

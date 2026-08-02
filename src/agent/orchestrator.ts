@@ -178,6 +178,11 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       return { plan: state.plan };
     }
     if (name === "request_completion") {
+      if (!state.plan.length || state.plan.some((item) => item.status !== "done"))
+        throw new RunError(
+          "TOOL_ERROR",
+          "Complete the current plan before requesting verification",
+        );
       requested = true;
       return { verificationRequested: true };
     }
@@ -192,6 +197,9 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       if (result.exitCode !== 0) throw new RunError("TOOL_ERROR", result.stderr);
       return result;
     }
+    if (["edit_file", "run_shell"].includes(name) && !state.plan.length)
+      throw new RunError("TOOL_ERROR", "Write a plan before editing or executing commands");
+    if (name === "run_shell") await checkpoints.snapshot("operational", signal);
     if (name === "edit_file") {
       const patch = String(args.patch);
       if (trace.containsSecret(patch))
@@ -299,6 +307,10 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
           action,
         });
       } catch (e) {
+        if (e instanceof RunError && e.usage) {
+          state.usage.inputTokens += e.usage.inputTokens;
+          state.usage.outputTokens += e.usage.outputTokens;
+        }
         if (
           e instanceof RunError &&
           e.code === "MODEL_RESPONSE_INVALID" &&
@@ -344,6 +356,10 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
         ) {
           const evidence = state.verification;
           await checkpoints.restore(state.checkpoints.validated, signal);
+          state.modified = await checkpoints.changed(signal);
+          state.verification = await verifier.verify(signal);
+          if (!state.verification.passed)
+            throw new RunError("SANDBOX_ERROR", "Restored checkpoint no longer verifies");
           state.usage.recoveryCount++;
           state.recovery = "restored latest validated checkpoint after two repair cycles";
           await trace.event("recovery", {

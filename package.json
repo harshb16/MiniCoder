@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "agent": "./src/cli.tsx"
+    "agent": "./bin/agent"
   },
   "scripts": {
     "start": "bun src/cli.tsx",
@@ -13,7 +13,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "sandbox:build": "docker build -t minicoder-sandbox:v1 .",
-    "smoke": "bun scripts/smoke.ts"
+    "smoke": "bun scripts/smoke.ts",
+    "check:secrets": "bun scripts/check-secrets.ts"
   },
   "dependencies": {
     "@google/genai": "latest",

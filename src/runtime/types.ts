@@ -43,6 +43,7 @@ export type Status =
   | "CANCELLED"
   | "LOOP_DETECTED";
 export class RunError extends Error {
+  usage?: { inputTokens: number; outputTokens: number };
   constructor(
     public code: FailureCode,
     message: string,
@@ -91,7 +92,12 @@ export interface RunState {
     recoveryCount: number;
   };
   context: { summary: string; estimatedTokens: number; limit: number; compactions: number };
-  checkpoints: { operational?: Checkpoint; validated?: Checkpoint; current?: string };
+  checkpoints: {
+    operational?: Checkpoint;
+    validated?: Checkpoint;
+    current?: string;
+    currentTree?: string;
+  };
   verification?: Verification;
   sandbox: string;
   recovery: string;

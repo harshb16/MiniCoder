@@ -14,6 +14,7 @@ export interface ToolExecutor {
 }
 export class McpTools {
   private token = randomUUID();
+  private inFlight = new Set<Promise<void>>();
   private http?: ReturnType<typeof createServer>;
   private server = new McpServer({ name: "MiniCoder tools", version: "1.0.0" });
   private transport = new StreamableHTTPServerTransport({
@@ -33,37 +34,47 @@ export class McpTools {
         name,
         { description: `MiniCoder ${name}`, inputSchema: toolSchemas[name].shape },
         async (args: Record<string, unknown>) => {
-          let value: unknown;
-          let failed = false;
-          try {
-            const parsed = toolSchemas[name].parse(args);
-            await this.hooks.emit("PreToolUse", { tool: name, arguments: parsed });
-            value = await this.executor.execute(name, parsed);
-          } catch (e) {
-            failed = true;
-            value = {
-              error: e instanceof RunError ? e.code : "TOOL_ERROR",
-              message: e instanceof Error ? e.message : "Tool failed",
-            };
-          }
-          const raw = this.trace.redact(JSON.stringify(value));
-          const artifact = await this.trace.output(name, raw);
-          const bounded = boundOutput(raw, this.outputChars);
-          await this.hooks.emit("PostToolUse", {
-            tool: name,
-            failed,
-            omitted: bounded.omitted,
-            artifact,
-            result: value,
+          let finished: () => void = () => {};
+          const done = new Promise<void>((resolve) => {
+            finished = resolve;
           });
-          if (bounded.omitted)
-            await this.trace.event("failure", {
-              code: "OUTPUT_TRUNCATED",
+          this.inFlight.add(done);
+          try {
+            let value: unknown;
+            let failed = false;
+            try {
+              const parsed = toolSchemas[name].parse(args);
+              await this.hooks.emit("PreToolUse", { tool: name, arguments: parsed });
+              value = await this.executor.execute(name, parsed);
+            } catch (e) {
+              failed = true;
+              value = {
+                error: e instanceof RunError ? e.code : "TOOL_ERROR",
+                message: e instanceof Error ? e.message : "Tool failed",
+              };
+            }
+            const raw = this.trace.redact(JSON.stringify(value));
+            const artifact = await this.trace.output(name, raw);
+            const bounded = boundOutput(raw, this.outputChars);
+            await this.hooks.emit("PostToolUse", {
               tool: name,
+              failed,
               omitted: bounded.omitted,
               artifact,
+              result: value,
             });
-          return { content: [{ type: "text" as const, text: bounded.text }], isError: failed };
+            if (bounded.omitted)
+              await this.trace.event("failure", {
+                code: "OUTPUT_TRUNCATED",
+                tool: name,
+                omitted: bounded.omitted,
+                artifact,
+              });
+            return { content: [{ type: "text" as const, text: bounded.text }], isError: failed };
+          } finally {
+            finished();
+            this.inFlight.delete(done);
+          }
         },
       );
     }
@@ -132,6 +143,7 @@ export class McpTools {
     return (await this.client.listTools()).tools.map((x) => x.name);
   }
   async close(): Promise<void> {
+    await Promise.allSettled([...this.inFlight]);
     await this.client.close();
     await this.server.close();
     if (this.http) {

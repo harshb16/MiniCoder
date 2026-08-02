@@ -9,11 +9,16 @@ export class Checkpoints {
     private state: RunState,
     private trace: Trace,
   ) {}
-  private async git(args: string[], signal?: AbortSignal, input?: string): Promise<string> {
+  private async git(
+    args: string[],
+    signal?: AbortSignal,
+    input?: string,
+    raw = false,
+  ): Promise<string> {
     const r = await this.sandbox.git(args, signal, input);
     if (r.exitCode !== 0 || r.timedOut || r.omittedBytes)
       throw new RunError("SANDBOX_ERROR", `Checkpoint Git failed: ${r.stderr.slice(-1000)}`);
-    return r.stdout.trim();
+    return raw ? r.stdout : r.stdout.trim();
   }
   async initialize(signal: AbortSignal): Promise<void> {
     await this.git(["add", "--force", "--all"], signal);
@@ -26,7 +31,9 @@ export class Checkpoints {
   }
   async fingerprint(signal?: AbortSignal): Promise<string> {
     await this.git(["add", "--all"], signal);
-    return this.git(["write-tree"], signal);
+    const tree = await this.git(["write-tree"], signal);
+    this.state.checkpoints.currentTree = tree;
+    return tree;
   }
   async snapshot(kind: Checkpoint["kind"], signal?: AbortSignal): Promise<Checkpoint> {
     const tree = await this.fingerprint(signal);
@@ -53,21 +60,25 @@ export class Checkpoints {
     const patch = await this.git(
       ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", this.baseline, "--"],
       signal,
+      undefined,
+      true,
     );
-    return patch ? `${patch}\n` : "";
+    return patch;
   }
   async changed(signal?: AbortSignal): Promise<string[]> {
     await this.fingerprint(signal);
     const value = await this.git(
       ["diff", "--cached", "--name-only", "-z", this.baseline, "--"],
       signal,
+      undefined,
+      true,
     );
     return value.split("\0").filter(Boolean);
   }
   async validPatch(signal: AbortSignal): Promise<boolean> {
     const patch = await this.diff(signal);
     if (!patch) return true;
-    // A temporary alternate index checks the entire binary/text diff against immutable baseline objects.
+    // Check the reverse binary/text patch against the runtime-owned current index.
     const result = await this.sandbox.git(
       ["apply", "--cached", "--reverse", "--check", "--whitespace=nowarn", "-"],
       signal,

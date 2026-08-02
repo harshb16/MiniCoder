@@ -8,39 +8,11 @@ import { type ModelAdapter, ModelChain, ProviderError } from "../src/models/adap
 import { Budgets, LoopDetector } from "../src/runtime/budgets";
 import { Hooks } from "../src/runtime/hooks";
 import { boundOutput, Trace } from "../src/runtime/trace";
-import { PlanSchema, type RunState, replacePlan, transition } from "../src/runtime/types";
+import { PlanSchema, replacePlan, transition } from "../src/runtime/types";
 import { processRun } from "../src/sandbox/process";
 import { normalizePath, shellPolicy, workspacePath } from "../src/tools/policy";
-export function state(): RunState {
-  return {
-    id: "test",
-    task: "fix",
-    repo: "/repo",
-    status: "CREATED",
-    model: "gemini",
-    turn: 0,
-    plan: [],
-    startedAt: new Date().toISOString(),
-    elapsedMs: 0,
-    budgets: { maxTurns: 3, timeoutMs: 10000, maxTokens: 10000, commandTimeoutMs: 100 },
-    usage: {
-      inputTokens: 0,
-      outputTokens: 0,
-      modelCalls: 0,
-      toolCounts: {},
-      fallbackCount: 0,
-      recoveryCount: 0,
-    },
-    context: { summary: "", estimatedTokens: 0, limit: 10000, compactions: 0 },
-    checkpoints: {},
-    sandbox: "idle",
-    recovery: "none",
-    inspected: [],
-    modified: [],
-    activity: [],
-    artifacts: "/tmp/test",
-  };
-}
+import { state } from "./helpers";
+
 describe("core invariants", () => {
   test("plan replacement is atomic and validates unique IDs and status", () => {
     const s = state();

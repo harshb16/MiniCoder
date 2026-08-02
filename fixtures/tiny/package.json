@@ -1,0 +1,7 @@
+{
+  "name": "minicoder-fixture",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}

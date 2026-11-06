@@ -35,8 +35,12 @@ export class Checkpoints {
     this.state.checkpoints.currentTree = tree;
     return tree;
   }
-  async snapshot(kind: Checkpoint["kind"], signal?: AbortSignal): Promise<Checkpoint> {
-    const tree = await this.fingerprint(signal);
+  async snapshot(
+    kind: Checkpoint["kind"],
+    signal?: AbortSignal,
+    tree?: string,
+  ): Promise<Checkpoint> {
+    tree ??= await this.fingerprint(signal);
     const id = await this.git(
       ["commit-tree", tree],
       signal,
@@ -55,28 +59,27 @@ export class Checkpoints {
     this.state.checkpoints.current = point.id;
     await this.trace.event("checkpoint_restore", point);
   }
-  async diff(signal?: AbortSignal): Promise<string> {
-    await this.fingerprint(signal);
-    const patch = await this.git(
-      ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", this.baseline, "--"],
+  async diff(signal?: AbortSignal, tree?: string): Promise<string> {
+    tree ??= await this.fingerprint(signal);
+    return this.git(
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", this.baseline, tree, "--"],
       signal,
       undefined,
       true,
     );
-    return patch;
   }
-  async changed(signal?: AbortSignal): Promise<string[]> {
-    await this.fingerprint(signal);
+  async changed(signal?: AbortSignal, tree?: string): Promise<string[]> {
+    tree ??= await this.fingerprint(signal);
     const value = await this.git(
-      ["diff", "--cached", "--name-only", "-z", this.baseline, "--"],
+      ["diff", "--name-only", "-z", this.baseline, tree, "--"],
       signal,
       undefined,
       true,
     );
     return value.split("\0").filter(Boolean);
   }
-  async validPatch(signal: AbortSignal): Promise<boolean> {
-    const patch = await this.diff(signal);
+  async validPatch(signal: AbortSignal, tree: string): Promise<boolean> {
+    const patch = await this.diff(signal, tree);
     if (!patch) return true;
     // Check the reverse binary/text patch against the runtime-owned current index.
     const result = await this.sandbox.git(

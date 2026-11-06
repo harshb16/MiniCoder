@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAgent } from "../src/agent/orchestrator";
@@ -41,19 +41,24 @@ class FakeSandbox implements Sandbox {
     this.calls.push(args);
     return ok(["commit-tree", "write-tree"].includes(args[0] ?? "") ? "a".repeat(40) : "");
   }
+  async accept(): Promise<number | undefined> {
+    throw new Error("Unexpected trusted acceptance");
+  }
   async cleanup(): Promise<void> {
     this.closed = true;
   }
 }
 const verification = (passed: boolean, fingerprint = "new"): Verification => ({
   passed,
+  repositoryChecks: { status: passed ? "passed" : "failed", changedCandidate: false },
+  trustedAcceptance: { status: "not_configured" },
   fingerprint,
   commands: [],
   errors: passed ? [] : ["test failed"],
   patchValid: true,
 });
 
-test("independent verifier executes frozen commands, detects failure and refuses absent checks", async () => {
+test("repository verifier executes frozen commands, detects failure and refuses absent checks", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mini-verify-"));
   const trace = new Trace(dir);
   await trace.init({});
@@ -68,7 +73,10 @@ test("independent verifier executes frozen commands, detects failure and refuses
       trace,
       100,
     );
-    expect((await verifier.verify(signal)).passed).toBe(true);
+    const repoOnly = await verifier.verify(signal);
+    expect(repoOnly.passed).toBe(true);
+    expect(repoOnly.repositoryChecks.status).toBe("passed");
+    expect(repoOnly.trustedAcceptance.status).toBe("not_configured");
     sandbox.testPass = false;
     const result = await verifier.verify(signal);
     expect(result.passed).toBe(false);
@@ -228,11 +236,75 @@ test("verifier pass is the only successful loop exit and metrics are persisted",
     });
     expect(result.status).toBe("SUCCESS");
     expect(result.verification?.passed).toBe(true);
+    expect(result.verification?.trustedAcceptance).toEqual({ status: "not_configured" });
     expect(result.checkpoints.validated?.kind).toBe("validated");
     expect(result.checkpoints.currentTree).toBe("a".repeat(40));
     const report = JSON.parse(await readFile(join(result.artifacts, "report.json"), "utf8"));
     expect(report.modelCalls).toBe(2);
     expect(report.inputTokens).toBe(20);
+    expect(report.verification.trustedAcceptance.status).toBe("not_configured");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("trusted acceptance requires a valid operator file outside the repository", async () => {
+  const { root, repo } = await inputRepo();
+  const options = { repo, task: "fix", config: loadConfig({}) };
+  try {
+    const inside = join(repo, "acceptance.json");
+    await writeFile(inside, JSON.stringify({ cases: [{ argv: ["/bin/true"], stdout: "" }] }));
+    await expect(runAgent({ ...options, acceptanceFile: inside })).rejects.toThrow("outside");
+    const outside = join(root, "acceptance.json");
+    await expect(runAgent({ ...options, acceptanceFile: outside })).rejects.toThrow();
+    await writeFile(outside, JSON.stringify({ cases: [] }));
+    await expect(runAgent({ ...options, acceptanceFile: outside })).rejects.toThrow(
+      "Invalid trusted acceptance configuration",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a passing verdict cannot authorize a patch exported from a different tree", async () => {
+  const { root, repo } = await inputRepo();
+  const sandbox = new FakeSandbox();
+  const acceptanceFile = join(root, "acceptance.json");
+  const changedTree = "b".repeat(40);
+  const unacceptedPatch = "diff --git a/math.ts b/math.ts\n--- a/math.ts\n+++ b/math.ts\n";
+  let tree = "a".repeat(40);
+  let acceptCalls = 0;
+  sandbox.git = async (args) => {
+    if (args[0] === "write-tree") return ok(tree);
+    if (args[0] === "diff" && args.includes(changedTree))
+      return ok(args.includes("--name-only") ? "math.ts\0" : unacceptedPatch);
+    return ok();
+  };
+  sandbox.accept = async () => {
+    // Simulate a tracked change after acceptance has received the final immutable tree.
+    if (++acceptCalls === 2) tree = changedTree;
+    return undefined;
+  };
+  try {
+    await writeFile(
+      acceptanceFile,
+      JSON.stringify({ cases: [{ argv: ["/bin/true"], stdout: "" }] }),
+    );
+    const result = await runAgent({
+      repo,
+      task: "fix",
+      config: loadConfig({}, { fallback: false }),
+      artifactRoot: join(root, "runs"),
+      acceptanceFile,
+      sandbox,
+      adapters: [completionModel("done")],
+    });
+    expect(acceptCalls).toBe(2);
+    expect(result.status).toBe("FAILED");
+    expect(result.failure?.code).toBe("VERIFICATION_FAILED");
+    expect(result.verification?.passed).toBe(false);
+    expect(result.verification?.trustedAcceptance).toEqual({ status: "stale" });
+    expect(await readFile(join(result.artifacts, "final.patch"), "utf8")).toBe(unacceptedPatch);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

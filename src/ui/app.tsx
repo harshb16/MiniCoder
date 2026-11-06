@@ -54,15 +54,12 @@ export function RunView({
       </Text>
       <Text>sandbox={state.sandbox}</Text>
       <Text>
-        verification=
+        repository-checks=
         {state.status === "VERIFYING"
           ? "running"
-          : state.verification
-            ? state.verification.passed
-              ? "passed"
-              : "failed"
-            : "pending"}{" "}
-        recovery={state.recovery}
+          : (state.verification?.repositoryChecks.status ?? "pending")}{" "}
+        trusted-acceptance={state.verification?.trustedAcceptance.status ?? "pending"} recovery=
+        {state.recovery}
       </Text>
       <Text bold>outcome={state.status}</Text>
       {state.failure ? (

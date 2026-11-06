@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Config } from "../config";
+import type { AcceptanceCase } from "../runtime/acceptance";
 import { type CommandResult, RunError } from "../runtime/types";
 import { processRun } from "./process";
 
@@ -12,11 +13,18 @@ export interface Sandbox {
     network?: boolean,
   ): Promise<CommandResult>;
   git(args: string[], signal?: AbortSignal, input?: string): Promise<CommandResult>;
+  accept(
+    tree: string,
+    cases: AcceptanceCase[],
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<number | undefined>;
   cleanup(): Promise<void>;
 }
 export class DockerSandbox implements Sandbox {
   private workspace = `minicoder-ws-${randomUUID()}`;
   private control = `minicoder-control-${randomUUID()}`;
+  private snapshots = new Set<string>();
   private active = new Set<string>();
   private closing = false;
   constructor(private config: Config) {}
@@ -81,7 +89,7 @@ export class DockerSandbox implements Sandbox {
           "-c",
           "printf '%s\\n' node_modules/ .venv/ target/ dist/ build/ coverage/ __pycache__/ .git/ .agent/ .env .env.* > /control/repo/info/exclude; chmod -R go-rwx /control",
         ],
-        { root: true, control: true, signal },
+        { root: true, control: "writable", signal },
       ),
     );
   }
@@ -89,7 +97,8 @@ export class DockerSandbox implements Sandbox {
     command: string[],
     options: {
       root?: boolean;
-      control?: boolean;
+      control?: "readonly" | "writable";
+      snapshot?: { volume: string; readonly: boolean };
       network?: boolean;
       signal?: AbortSignal;
       input?: string;
@@ -126,10 +135,16 @@ export class DockerSandbox implements Sandbox {
       "--workdir",
       "/workspace",
       "--mount",
-      `type=volume,src=${this.workspace},dst=/workspace`,
+      options.snapshot
+        ? `type=volume,src=${options.snapshot.volume},dst=/workspace,volume-nocopy${options.snapshot.readonly ? ",readonly" : ""}`
+        : `type=volume,src=${this.workspace},dst=/workspace`,
     ];
     // Only trusted Git/control operations receive the checkpoint volume.
-    if (options.control) args.push("--mount", `type=volume,src=${this.control},dst=/control`);
+    if (options.control)
+      args.push(
+        "--mount",
+        `type=volume,src=${this.control},dst=/control${options.control === "readonly" ? ",readonly" : ""}`,
+      );
     if (options.root) args.push("--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN");
     args.push(this.config.image, ...command);
     try {
@@ -211,13 +226,70 @@ export class DockerSandbox implements Sandbox {
         "--work-tree=/workspace",
         ...args,
       ],
-      { root: true, control: true, signal, input, maxBytes: 12000000, timeoutMs: 60000 },
+      { root: true, control: "writable", signal, input, maxBytes: 12000000, timeoutMs: 60000 },
     );
     if (args[0] === "read-tree" || args[0] === "checkout")
       this.must(
         await this.container(["chown", "-R", "1000:1000", "/workspace"], { root: true, signal }),
       );
     return result;
+  }
+  async accept(
+    tree: string,
+    cases: AcceptanceCase[],
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<number | undefined> {
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new RunError("SANDBOX_ERROR", "Invalid Git tree");
+    const volume = `minicoder-snapshot-${randomUUID()}`;
+    this.snapshots.add(volume);
+    try {
+      this.must(await this.docker(["volume", "create", volume], { signal }));
+      // A separate bare repository reads only runtime-owned objects. Override candidate
+      // archive and checkout attributes so the snapshot contains the stored Git blobs.
+      this.must(
+        await this.container(
+          [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            String.raw`umask 022
+git init -q --bare /tmp/acceptance-git
+printf '%s\n' '* -export-ignore -export-subst -text -eol -crlf -ident -filter -working-tree-encoding' > /tmp/acceptance-git/info/attributes
+export GIT_OBJECT_DIRECTORY=/control/repo/objects GIT_ATTR_NOSYSTEM=1
+git --git-dir=/tmp/acceptance-git ls-tree -r --format='%(objectmode)' "$1" |
+  awk '$0 != "100644" && $0 != "100755" { bad = 1 } END { exit bad }'
+git --git-dir=/tmp/acceptance-git -c core.attributesFile=/dev/null archive --format=tar "$1" |
+  tar -x --no-same-owner --no-same-permissions`,
+            "minicoder-snapshot",
+            tree,
+          ],
+          { root: true, control: "readonly", snapshot: { volume, readonly: false }, signal },
+        ),
+      );
+      for (const [index, test] of cases.entries()) {
+        signal.throwIfAborted();
+        const result = await this.container(test.argv, {
+          snapshot: { volume, readonly: true },
+          input: test.stdin,
+          signal,
+          timeoutMs,
+        });
+        signal.throwIfAborted();
+        // Expected values and the pass/fail decision stay in the host runtime.
+        if (
+          result.exitCode !== 0 ||
+          result.timedOut ||
+          result.omittedBytes ||
+          result.stdout !== test.stdout
+        )
+          return index + 1;
+      }
+    } finally {
+      const removed = await this.docker(["volume", "rm", "-f", volume], { timeoutMs: 10000 });
+      if (removed.exitCode === 0) this.snapshots.delete(volume);
+    }
   }
   async cleanup(): Promise<void> {
     this.closing = true;
@@ -229,7 +301,9 @@ export class DockerSandbox implements Sandbox {
     };
     for (const name of this.active) await remove(["rm", "-f", name]);
     this.active.clear();
-    for (const name of [this.workspace, this.control]) await remove(["volume", "rm", "-f", name]);
+    for (const name of [this.workspace, this.control, ...this.snapshots])
+      await remove(["volume", "rm", "-f", name]);
+    this.snapshots.clear();
     if (failures.length)
       throw new RunError("SANDBOX_ERROR", `Sandbox cleanup failed: ${failures.join("; ")}`);
   }

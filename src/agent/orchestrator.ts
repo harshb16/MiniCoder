@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -6,6 +6,7 @@ import type { Config } from "../config";
 import { createAdapters, type ModelAdapter, ModelChain } from "../models/adapters";
 import type { Action, ToolName } from "../models/schema";
 import { ActionSchema, toolSchemas } from "../models/schema";
+import { loadAcceptance } from "../runtime/acceptance";
 import { Budgets, LoopDetector } from "../runtime/budgets";
 import { Checkpoints } from "../runtime/checkpoints";
 import { Hooks } from "../runtime/hooks";
@@ -24,6 +25,7 @@ export interface RunOptions {
   task: string;
   config: Config;
   artifactRoot?: string;
+  acceptanceFile?: string;
   signal?: AbortSignal;
   onState?: (state: RunState) => void;
   hooks?: Hooks;
@@ -34,6 +36,10 @@ export interface RunOptions {
 export async function runAgent(options: RunOptions): Promise<RunState> {
   const { config } = options;
   const repo = await realpath(options.repo);
+  const acceptance =
+    options.acceptanceFile === undefined
+      ? undefined
+      : await loadAcceptance(options.acceptanceFile, repo);
   const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   let artifactRoot = resolve(
     options.artifactRoot ?? join(homedir(), ".local/state/minicoder/.agent/runs"),
@@ -99,6 +105,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
     task: options.task,
     version: "1.0.0",
     config: { ...config, freeTierConfirmed: config.freeTierConfirmed },
+    trustedAcceptanceConfigured: acceptance !== undefined,
   });
   const ac = new AbortController();
   const externalAbort = () => ac.abort(new RunError("CANCELLED", "User cancelled run"));
@@ -259,11 +266,19 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       if (result.exitCode !== 0 || result.timedOut)
         throw new RunError("SANDBOX_ERROR", "Bootstrap command failed");
     }
-    verifier = new Verifier(sandbox, checkpoints, verifyConfig, trace, config.commandTimeoutMs);
+    verifier = new Verifier(
+      sandbox,
+      checkpoints,
+      verifyConfig,
+      trace,
+      config.commandTimeoutMs,
+      acceptance,
+    );
     activity("verify input baseline");
     await publish();
     state.verification = await verifier.verify(signal);
-    if (state.verification.passed) await checkpoints.snapshot("validated", signal);
+    if (state.verification.passed)
+      await checkpoints.snapshot("validated", signal, state.verification.fingerprint);
     recovery.observe(state.verification, state.checkpoints.validated);
     transition(state, "RUNNING");
     mcp = new McpTools({ execute }, hooks, trace, config.outputChars);
@@ -341,7 +356,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
         await publish();
         state.verification = await verifier.verify(signal);
         if (state.verification.passed) {
-          await checkpoints.snapshot("validated", signal);
+          await checkpoints.snapshot("validated", signal, state.verification.fingerprint);
           budget.check(signal);
           transition(state, "SUCCESS", true);
           break;
@@ -428,13 +443,34 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
         .close()
         .catch((e) => trace.event("cleanup_error", { component: "mcp", message: String(e) }));
     // Export partial work even after cancellation, using a fresh bounded cleanup signal.
+    const invalidateAcceptance = (message: string) => {
+      if (state.verification?.trustedAcceptance.status !== "passed") return;
+      state.verification.trustedAcceptance = { status: "stale" };
+      state.verification.passed = false;
+      state.verification.errors.push(message);
+    };
     if (ready)
       try {
         const cleanupSignal = AbortSignal.timeout(10000);
-        const patch = await checkpoints.diff(cleanupSignal);
-        state.modified = await checkpoints.changed(cleanupSignal);
+        const tree = await checkpoints.fingerprint(cleanupSignal);
+        const patch = await checkpoints.diff(cleanupSignal, tree);
+        state.modified = await checkpoints.changed(cleanupSignal, tree);
         await trace.finalPatch(patch);
+        const accepted = state.verification?.trustedAcceptance;
+        if (accepted?.status === "passed") {
+          if (accepted.fingerprint === tree) {
+            accepted.patchSha256 = createHash("sha256").update(patch).digest("hex");
+          } else {
+            const message = "Exported candidate differs from the accepted Git tree";
+            invalidateAcceptance(message);
+            if (state.status === "SUCCESS") {
+              state.status = "FAILED";
+              state.failure = { code: "VERIFICATION_FAILED", message };
+            }
+          }
+        }
       } catch (e) {
+        invalidateAcceptance("Final patch export failed");
         await trace.event("patch_export_failed", { message: String(e) });
         await writeFile(join(state.artifacts, "final.patch"), "", { mode: 0o600 });
         if (state.status === "SUCCESS") {

@@ -66,6 +66,11 @@ export interface Checkpoint {
 }
 export interface Verification {
   passed: boolean;
+  repositoryChecks: { status: "passed" | "failed" | "skipped"; changedCandidate: boolean };
+  trustedAcceptance:
+    | { status: "not_configured" | "skipped" | "stale" }
+    | { status: "failed"; fingerprint: string; failedCase: number }
+    | { status: "passed"; fingerprint: string; patchSha256?: string };
   commands: { command: string; result: CommandResult }[];
   errors: string[];
   patchValid: boolean;

@@ -1,6 +1,6 @@
 # MiniCoder
 
-MiniCoder V1 is a terminal-native autonomous coding agent for local Git repositories. One agent plans, navigates source, applies patches, runs commands in Docker, and requests independent runtime verification. Every run exports a patch and structured trace. The source repository is never mounted into the sandbox or changed by a run.
+MiniCoder V1 is a terminal-native autonomous coding agent for local Git repositories. One agent plans, navigates source, applies patches, and runs commands in Docker. The runtime checks the candidate with repository commands and can require operator-owned acceptance. Every run exports a patch and structured trace. The source repository is never mounted into the sandbox or changed by a run.
 
 ```bash
 agent run /path/to/repo "Fix the pagination boundary bug"
@@ -16,27 +16,29 @@ flowchart TD
   Context --> Models[Gemini SDK / FreeLLMAPI adapter]
   Agent --> MCP[Authenticated local MCP Streamable HTTP]
   MCP --> Sandbox[Docker command containers / private workspace volume]
-  Runtime --> Verify[Independent verifier]
+  Runtime --> Verify[Repository checks and opt-in trusted acceptance]
   Verify --> Checkpoints[Private Git checkpoints / recovery]
   Runtime --> Trace[JSON state / JSONL events / patch / report]
 ```
 
 The model selects one schema-validated action per turn. The runtime controls execution and success. See [architecture](docs/architecture.md) for boundaries, invariants, and tradeoffs.
 
-## Installation
+## Clean-checkout quickstart
 
 Requirements: Bun 1.3.11 or newer, Git, and a running local Docker daemon. Host ripgrep is not required; it is installed in the sandbox image. On Linux, your account needs Docker access. The image includes Bun, Node/npm, Python, a C/C++ toolchain, Git, and ripgrep.
 
-From this repository:
+Clone MiniCoder, build the sandbox, and run the deterministic fixture without provider credentials.
 
 ```bash
+git clone https://github.com/harshb16/MiniCoder.git
+cd MiniCoder
 bun install --frozen-lockfile
 bun run sandbox:build
-export PATH="$PWD/bin:$PATH"
-agent --help
+./bin/agent --help
+bun run smoke
 ```
 
-The PATH step exposes this checkout's executable. It also makes the intended executable explicit if another product already provides a command called `agent`. Optional global package linking: `bun link`; ensure Bun's global bin directory precedes other `agent` binaries. Rebuild the image after changing sandbox/tool code or dependencies. The image contains installed packages from this checkout, including compatible pinned tree-sitter WASM grammars.
+To use the `agent` commands below, run `export PATH="$PWD/bin:$PATH"` from the MiniCoder checkout. Rebuild the image after changing sandbox code or dependencies. The image contains installed packages from this checkout, including pinned tree-sitter WASM grammars.
 
 ## Strict $0 inference setup
 
@@ -131,9 +133,26 @@ Plans are complete atomic arrays of `{id, content, status, notes?}` with unique 
 
 MCP is a per-run loopback Streamable HTTP endpoint with a random bearer capability and origin rejection. It is not a general-purpose public MCP server. Each tool result is capped at 16,000 model-visible characters (roughly 4k tokens), retaining useful beginning/end portions and an omission notice. Raw redacted results are stored separately. Shell streams have a further 1 MB cap per stream; patch export has a 12 MB cap and fails rather than silently exporting a partial patch.
 
-## Independent verification and recovery
+## Repository checks, trusted acceptance, and recovery
 
-The runtime verifies the input baseline, freezes the command list, and independently reruns checks after completion requests. It audits workspace policy before/after tests and validates the Git patch. A failure returns command exits, diagnostics, and policy errors to the same agent while budgets remain. Only a verifier pass permits `SUCCESS`.
+The runtime verifies the baseline, freezes the repository command list, and reruns it after completion requests. Repository scripts and tests remain editable by the agent. The runtime audits workspace policy and validates the Git patch before and after those commands. With no acceptance configuration, a successful run reports `repositoryChecks.status: "passed"` and `trustedAcceptance.status: "not_configured"`.
+
+Use `--trusted-acceptance <file>` to require an operator-owned check in addition to repository checks. Keep the JSON file outside the target repository. This example uses the [operator fixture](fixtures/acceptance/tiny.json) from the MiniCoder checkout and a separate temporary Git repository. The final command requires the free-only provider setup above.
+
+```bash
+fixture=$(mktemp -d)
+cp -R fixtures/tiny "$fixture/repo"
+git init "$fixture/repo"
+./bin/agent run "$fixture/repo" "Fix add so it adds instead of subtracting" \
+  --model gemini --non-interactive \
+  --trusted-acceptance "$PWD/fixtures/acceptance/tiny.json"
+```
+
+Each case specifies an `argv` array with an absolute executable path, optional `stdin`, and the exact expected UTF-8 `stdout`, including newlines. The runtime reads the cases before the run and invokes each command in a fresh, non-root Docker container with networking disabled. It requires exit code zero and complete, matching stdout. Case inputs reach the program. The configuration file, expected output, and assertions stay on the host. MiniCoder exposes the failing case number to the agent.
+
+Acceptance sees a read-only copy of the exact Git tree captured **after** repository checks. If a check rewrites tracked content, acceptance evaluates the rewritten tree. The acceptance container receives neither the agent's writable volume and ignored dependencies nor the checkpoint volume. It has no host mounts, host credentials, or Docker socket. Use executables and dependencies from the sandbox image and `/tmp` for scratch files. Prefer cases that invoke the behavior under test directly.
+
+The final report records the accepted Git tree ID and the SHA-256 of `final.patch` as `verification.trustedAcceptance.fingerprint` and `patchSha256`. You can compare the latter with `shasum -a 256 /path/to/final.patch`. If the exported tree differs from the accepted tree, the report marks acceptance `stale` and the patch remains available for review.
 
 Private Git objects provide operational checkpoints before edits, commands, and plan transitions. A passing baseline/final verification creates a validated checkpoint. After a regression from a validated state, two repair cycles are allowed; a third failed completion verification restores that checkpoint and re-verifies it. Normal intermediate shell failures do not trigger rollback. If the input baseline already fails, no validated rollback target is invented.
 
@@ -172,9 +191,17 @@ bun run smoke
 bun run check:secrets
 ```
 
-The smoke test builds a temporary Git fixture, uses a deterministic action source, and exercises the real Docker, MCP, tools, autonomous loop, verifier, checkpoints, patch export, and host-preservation checks. It is an infrastructure test, not a model-quality benchmark. It prints the retained artifact directory.
+The deterministic smoke uses real Docker and MCP with scripted actions. It checks that a weakened repository test and a passing test that mutates tracked source both fail trusted acceptance. It then fixes the source, verifies the final patch digest, and checks that the original source stayed unchanged. It prints the retained artifact directory.
 
-Opt-in live tests require confirmed free-only credentials:
+```text
+$ bun run smoke
+smoke SUCCESS:15:cleaned
+weakened-test: repository=passed candidate-changed=false trusted=failed
+verification-mutation: repository=passed candidate-changed=true trusted=failed
+source-fix: repository=passed candidate-changed=false trusted=passed
+```
+
+**Live trusted-acceptance validation is pending.** The local provider configuration lacked the required free-only attestation. The opt-in live fixture uses the same acceptance cases as the deterministic smoke and requires confirmed free-only credentials:
 
 ```bash
 MINICODER_FREE_TIER_CONFIRMED=true bun scripts/live-smoke.ts gemini
@@ -197,6 +224,6 @@ Autonomous commands use fresh non-root containers: 2 CPUs, 1 GB RAM, 128 PIDs, r
 
 V1 implements the complete local workflow and passes deterministic/unit, protocol, Docker recovery, and end-to-end fixture checks. Live Gemini and Qwen produced valid coding actions, but their coding fixtures did not complete: Gemini encountered HTTP 503 and Qwen exhausted HTTP 429 retries. The refreshed DeepSeek route returned HTTP 503 indicating a missing usable upstream provider key. An unavailable provider is reported honestly, never treated as a successful run. See [validation notes](docs/validation.md) for the exact observed outcomes. There are no performance or benchmark claims.
 
-Verification proves configured checks and runtime policy, not semantic correctness of every natural-language task. Tests remain editable source; a task-specific trusted acceptance command is strongly preferable. Command blocking is defense in depth and not a shell parser or security boundary. Ordinary Docker copy limits and artifact caps bound some I/O but do not replace filesystem quotas.
+Trusted acceptance covers the cases the operator specifies. Command blocking is defense in depth. Ordinary Docker copy limits and artifact caps bound some I/O but do not replace filesystem quotas.
 
-Future direction: durable crash reconstruction and resume, followed by stronger trusted acceptance checks and a small reproducible evaluation harness. V2 is not implemented.
+Future work includes durable crash reconstruction, resume, and a broader evaluation harness.

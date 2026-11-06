@@ -1,0 +1,13 @@
+{
+  "cases": [
+    {
+      "argv": [
+        "/usr/local/bin/bun",
+        "--no-env-file",
+        "-e",
+        "import { add } from './math.ts'; console.log(JSON.stringify([add(2, 3), add(-2, 3)]))"
+      ],
+      "stdout": "[5,1]\n"
+    }
+  ]
+}

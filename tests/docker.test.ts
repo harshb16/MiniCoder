@@ -98,7 +98,9 @@ dockerTest(
         trace,
         10000,
       );
-      expect((await verifier.verify(signal)).passed).toBe(true);
+      const repoOnly = await verifier.verify(signal);
+      expect(repoOnly.passed).toBe(true);
+      expect(repoOnly.trustedAcceptance.status).toBe("not_configured");
       const validated = await points.snapshot("validated", signal);
       await points.snapshot("operational", signal);
       await sandbox.tool(
@@ -113,6 +115,40 @@ dockerTest(
       expect((await verifier.verify(signal)).passed).toBe(false);
       await points.restore(validated, signal);
       expect((await verifier.verify(signal)).passed).toBe(true);
+      const setup = await sandbox.shell(
+        String.raw`printf '%s\n' 'exact.txt export-ignore export-subst text eol=crlf ident' > .gitattributes
+printf '%s\n' 'literal $Id$ $Format:%H$' > exact.txt
+mkdir -p node_modules
+touch node_modules/agent-generated`,
+        10000,
+        signal,
+      );
+      expect(setup.exitCode).toBe(0);
+      const tree = await points.fingerprint(signal);
+      const failedCase = await sandbox.accept(
+        tree,
+        [
+          {
+            argv: [
+              "/bin/bash",
+              "-ec",
+              `test "$(id -u)" = 1000
+test ! -e /control/repo
+test ! -e /var/run/docker.sock
+test ! -e node_modules/agent-generated
+test -z "$(env | grep -E '^(GEMINI_API_KEY|FREELLMAPI_API_KEY)=')"
+test "$(wc -l < /proc/net/route)" = 1
+! (echo replaced > exact.txt)`,
+            ],
+            stdout: "",
+          },
+          { argv: ["/bin/cat", "exact.txt"], stdout: "literal $Id$ $Format:%H$\n" },
+          { argv: ["/bin/cat"], stdin: "operator input\n", stdout: "operator input\n" },
+        ],
+        10000,
+        signal,
+      );
+      expect(failedCase).toBeUndefined();
       await sandbox.tool(
         "edit_file",
         {

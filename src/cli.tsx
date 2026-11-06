@@ -22,12 +22,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         "non-interactive": { type: "boolean" },
         benchmark: { type: "boolean" },
         "artifact-dir": { type: "string" },
+        "trusted-acceptance": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
     if (parsed.values.help) {
       console.log(
-        'MiniCoder V1\nUsage: agent run <repo> "<task>" [--model gemini|qwen|deepseek] [--max-turns 50] [--timeout 900] [--network none|enabled] [--non-interactive] [--benchmark] [--artifact-dir <dir>]',
+        'MiniCoder V1\nUsage: agent run <repo> "<task>" [--model gemini|qwen|deepseek] [--max-turns 50] [--timeout 900] [--network none|enabled] [--non-interactive] [--benchmark] [--artifact-dir <dir>] [--trusted-acceptance <file>]',
       );
       return 0;
     }
@@ -68,6 +69,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       task,
       config,
       artifactRoot: parsed.values["artifact-dir"],
+      acceptanceFile: parsed.values["trusted-acceptance"],
       signal: ac.signal,
       onState: interactive
         ? (state) => {

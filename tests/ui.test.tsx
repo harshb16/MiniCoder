@@ -19,7 +19,8 @@ test("Ink view renders all runtime fields without a terminal", () => {
     "context=",
     "tokens=",
     "sandbox=",
-    "verification=",
+    "repository-checks=",
+    "trusted-acceptance=",
     "recovery=",
     "outcome=",
   ])

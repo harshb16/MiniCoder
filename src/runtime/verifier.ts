@@ -1,5 +1,6 @@
 import type { RepoConfig } from "../config";
 import type { Sandbox } from "../sandbox/docker";
+import type { AcceptanceCase } from "./acceptance";
 import type { Checkpoints } from "./checkpoints";
 import type { Trace } from "./trace";
 import { boundOutput } from "./trace";
@@ -62,6 +63,7 @@ export class Verifier {
     private config: VerificationConfig,
     private trace: Trace,
     private timeoutMs: number,
+    private acceptance?: AcceptanceCase[],
   ) {}
   async verify(signal: AbortSignal): Promise<Verification> {
     const errors: string[] = [];
@@ -69,8 +71,9 @@ export class Verifier {
     const audit = (await this.sandbox.tool("audit", {}, signal)) as { violations: string[] };
     if (audit.violations.length)
       errors.push(`Workspace policy violations: ${audit.violations.join(", ")}`);
-    const patchValid = await this.checkpoints.validPatch(signal);
-    if (!patchValid) errors.push("Final patch failed Git validation");
+    const before = await this.checkpoints.fingerprint(signal);
+    const patchValidBefore = await this.checkpoints.validPatch(signal, before);
+    if (!patchValidBefore) errors.push("Final patch failed Git validation");
     if (this.config.commands.length === 0)
       errors.push("No meaningful verification commands; configure .minicoder.json verification");
     if (errors.length === 0)
@@ -81,6 +84,7 @@ export class Verifier {
           JSON.stringify({ command, result }),
         );
         await this.trace.event("verification_command", {
+          scope: "repository",
           command,
           exitCode: result.exitCode,
           timedOut: result.timedOut,
@@ -103,14 +107,41 @@ export class Verifier {
     const after = (await this.sandbox.tool("audit", {}, signal)) as { violations: string[] };
     if (after.violations.length)
       errors.push(`Post-verification policy violations: ${after.violations.join(", ")}`);
-    if (!(await this.checkpoints.validPatch(signal)))
-      errors.push("Post-verification patch invalid");
-    const result = {
+    const fingerprint = await this.checkpoints.fingerprint(signal);
+    const patchValidAfter = await this.checkpoints.validPatch(signal, fingerprint);
+    if (!patchValidAfter) errors.push("Post-verification patch invalid");
+    let trustedAcceptance: Verification["trustedAcceptance"] = {
+      status: this.acceptance ? "skipped" : "not_configured",
+    };
+    if (this.acceptance && errors.length === 0) {
+      const failedCase = await this.sandbox.accept(
+        fingerprint,
+        this.acceptance,
+        this.timeoutMs,
+        signal,
+      );
+      if (failedCase === undefined) {
+        trustedAcceptance = { status: "passed", fingerprint };
+      } else {
+        trustedAcceptance = { status: "failed", fingerprint, failedCase };
+        errors.push(`Trusted acceptance case ${failedCase} failed`);
+      }
+    }
+    const result: Verification = {
       passed: errors.length === 0,
+      repositoryChecks: {
+        status: !commands.length
+          ? "skipped"
+          : commands.some(({ result }) => result.exitCode !== 0 || result.timedOut)
+            ? "failed"
+            : "passed",
+        changedCandidate: fingerprint !== before,
+      },
+      trustedAcceptance,
       commands,
       errors,
-      patchValid,
-      fingerprint: await this.checkpoints.fingerprint(signal),
+      patchValid: patchValidBefore && patchValidAfter,
+      fingerprint,
     };
     await this.trace.event("verification", result);
     return result;

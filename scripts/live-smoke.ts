@@ -33,6 +33,7 @@ try {
     repo,
     task: "Fix add(a, b) in math.ts so it adds instead of subtracting. Inspect the file, make the smallest patch, run bun test, and request runtime completion when it passes.",
     config,
+    acceptanceFile: join(import.meta.dir, "../fixtures/acceptance/tiny.json"),
     adapters,
     artifactRoot: join(root, ".agent/runs"),
     onState: (s) => {
@@ -50,6 +51,12 @@ try {
     const apply = await processRun("git", ["-C", repo, "apply", "--check", "-"], { input: patch });
     if (apply.exitCode !== 0 || !patch.includes("+  return a + b;"))
       throw new Error("Unexpected exported patch");
+    const accepted = result.verification?.trustedAcceptance;
+    if (
+      accepted?.status !== "passed" ||
+      accepted.patchSha256 !== createHash("sha256").update(patch).digest("hex")
+    )
+      throw new Error("Trusted acceptance does not bind the exported patch");
   }
   console.log(
     JSON.stringify({
@@ -58,7 +65,8 @@ try {
       turns: result.turn,
       fallbackCount: result.usage.fallbackCount,
       hostUnchanged: true,
-      verification: result.verification?.passed,
+      repositoryChecks: result.verification?.repositoryChecks,
+      trustedAcceptance: result.verification?.trustedAcceptance,
       failure: result.failure,
       artifacts: result.artifacts,
     }),
@@ -67,3 +75,5 @@ try {
 } finally {
   await rm(repo, { recursive: true, force: true });
 }
+
+import { createHash } from "node:crypto";

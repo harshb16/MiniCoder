@@ -38,6 +38,10 @@ bun run sandbox:build
 bun run smoke
 ```
 
+Run `bun run smoke --tui` in a terminal to watch the same fixture. The capture shows the final repository checks and trusted acceptance verdict for the exported patch.
+
+![MiniCoder terminal showing a completed two-step plan, one changed file, passing checks, and patch and report paths](docs/images/minicoder-tui.png)
+
 To use the `agent` commands below, run `export PATH="$PWD/bin:$PATH"` from the MiniCoder checkout. Rebuild the image after changing sandbox code or dependencies. The image contains installed packages from this checkout, including pinned tree-sitter WASM grammars.
 
 ## Strict $0 inference setup

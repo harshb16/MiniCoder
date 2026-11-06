@@ -8,6 +8,7 @@ import type { ModelAdapter } from "../src/models/adapters";
 import type { Action } from "../src/models/schema";
 import type { Verification } from "../src/runtime/types";
 import { processRun } from "../src/sandbox/process";
+import { createRunDisplay } from "../src/ui/app";
 
 function replaceTests(source: string): Action {
   return {
@@ -77,108 +78,132 @@ const actions: Action[] = [
   { tool: "git", arguments: { operation: "diff" } },
   complete,
 ];
-const root = await mkdtemp(join(tmpdir(), "minicoder-smoke-"));
-const repo = join(root, "repo");
-await cp(join(import.meta.dir, "../fixtures/tiny"), repo, { recursive: true });
-try {
-  const init = await processRun("git", ["init", repo]);
-  if (init.exitCode !== 0) throw new Error(init.stderr);
-  const before = await readFile(join(repo, "math.ts"), "utf8");
-  const adapter: ModelAdapter = {
-    key: "gemini",
-    id: "deterministic-fixture",
-    contextLimit: 32000,
-    generate: async () => {
-      const action = actions.shift();
-      if (!action) throw new Error("Smoke action sequence exhausted");
-      return { action, inputTokens: 100, outputTokens: 50 };
-    },
-  };
-  let phase = "";
-  const result = await runAgent({
-    repo,
-    task: "Fix add(a, b) so it adds instead of subtracting.",
-    config: loadConfig(
-      {},
-      { maxTurns: actions.length, timeoutMs: 300000, commandTimeoutMs: 10000, fallback: false },
-    ),
-    acceptanceFile: join(import.meta.dir, "../fixtures/acceptance/tiny.json"),
-    artifactRoot: join(root, ".agent/runs"),
-    adapters: [adapter],
-    onState: (s) => {
-      const next = `${s.status}:${s.turn}:${s.sandbox}`;
-      if (next !== phase) {
-        console.error(`smoke ${next}`);
-        phase = next;
-      }
-    },
-  });
-  if (result.status !== "SUCCESS")
-    throw new Error(
+async function main() {
+  const tui = process.argv.includes("--tui");
+  if (tui && !(process.stdin.isTTY && process.stdout.isTTY))
+    throw new Error("--tui requires a terminal");
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  const display = tui ? createRunDisplay(cancel) : undefined;
+  const root = await mkdtemp(join(tmpdir(), "minicoder-smoke-"));
+  const repo = join(root, "repo");
+  await cp(join(import.meta.dir, "../fixtures/tiny"), repo, { recursive: true });
+  try {
+    if (display) {
+      process.once("SIGINT", cancel);
+      process.once("SIGTERM", cancel);
+    }
+    const init = await processRun("git", ["init", repo]);
+    if (init.exitCode !== 0) throw new Error(init.stderr);
+    const before = await readFile(join(repo, "math.ts"), "utf8");
+    const adapter: ModelAdapter = {
+      key: "gemini",
+      id: "deterministic-fixture",
+      contextLimit: 32000,
+      generate: async () => {
+        const action = actions.shift();
+        if (!action) throw new Error("Smoke action sequence exhausted");
+        return { action, inputTokens: 100, outputTokens: 50 };
+      },
+    };
+    let phase = "";
+    const result = await runAgent({
+      repo,
+      task: "Fix add(a, b) so it adds instead of subtracting.",
+      config: loadConfig(
+        {},
+        { maxTurns: actions.length, timeoutMs: 300000, commandTimeoutMs: 10000, fallback: false },
+      ),
+      acceptanceFile: join(import.meta.dir, "../fixtures/acceptance/tiny.json"),
+      artifactRoot: join(root, ".agent/runs"),
+      adapters: [adapter],
+      signal: controller.signal,
+      onState:
+        display?.update ??
+        ((s) => {
+          const next = `${s.status}:${s.turn}:${s.sandbox}`;
+          if (next !== phase) {
+            console.error(`smoke ${next}`);
+            phase = next;
+          }
+        }),
+    });
+    if (display && result.status === "CANCELLED") {
+      process.exitCode = 130;
+      return;
+    }
+    if (result.status !== "SUCCESS")
+      throw new Error(
+        JSON.stringify({
+          status: result.status,
+          failure: result.failure,
+          verification: result.verification,
+        }),
+      );
+    if ((await readFile(join(repo, "math.ts"), "utf8")) !== before)
+      throw new Error("Original source changed");
+    const patch = await readFile(join(result.artifacts, "final.patch"), "utf8");
+    if (!patch.includes("+  return a + b;") || result.modified.join(",") !== "math.ts")
+      throw new Error("Unexpected exported patch");
+    const apply = await processRun("git", ["-C", repo, "apply", "--check", "-"], { input: patch });
+    if (apply.exitCode !== 0) throw new Error(`Exported patch invalid: ${apply.stderr}`);
+    const events = (await readFile(join(result.artifacts, "events.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((x) => JSON.parse(x));
+    for (const event of ["plan_change", "tool_call", "verification", "checkpoint", "model_result"])
+      if (!events.some((x) => x.type === event)) throw new Error(`Missing trace event ${event}`);
+    const [baseline, weakened, mutated, fixed, ...extra]: Verification[] = events
+      .filter((x) => x.type === "verification")
+      .map((x) => x.data);
+    if (
+      extra.length ||
+      baseline?.repositoryChecks.status !== "failed" ||
+      weakened?.repositoryChecks.status !== "passed" ||
+      weakened.repositoryChecks.changedCandidate ||
+      weakened.trustedAcceptance.status !== "failed" ||
+      mutated?.repositoryChecks.status !== "passed" ||
+      !mutated.repositoryChecks.changedCandidate ||
+      mutated.trustedAcceptance.status !== "failed" ||
+      mutated.trustedAcceptance.fingerprint !== mutated.fingerprint ||
+      fixed?.repositoryChecks.status !== "passed" ||
+      fixed.repositoryChecks.changedCandidate ||
+      fixed.trustedAcceptance.status !== "passed"
+    )
+      throw new Error("Unexpected repository and trusted acceptance evidence");
+    const accepted = result.verification?.trustedAcceptance;
+    if (
+      accepted?.status !== "passed" ||
+      accepted.fingerprint !== fixed.fingerprint ||
+      accepted.patchSha256 !== createHash("sha256").update(patch).digest("hex")
+    )
+      throw new Error("Trusted acceptance does not bind the exported patch");
+    if (display) return;
+    for (const [label, evidence] of [
+      ["weakened-test", weakened],
+      ["verification-mutation", mutated],
+      ["source-fix", fixed],
+    ] as const)
+      console.log(
+        `${label}: repository=${evidence.repositoryChecks.status} candidate-changed=${evidence.repositoryChecks.changedCandidate} trusted=${evidence.trustedAcceptance.status}`,
+      );
+    console.log(
       JSON.stringify({
         status: result.status,
-        failure: result.failure,
-        verification: result.verification,
+        model: result.model,
+        turns: result.turn,
+        hostUnchanged: true,
+        patchValid: true,
+        trustedAcceptance: accepted,
+        artifacts: result.artifacts,
       }),
     );
-  if ((await readFile(join(repo, "math.ts"), "utf8")) !== before)
-    throw new Error("Original source changed");
-  const patch = await readFile(join(result.artifacts, "final.patch"), "utf8");
-  if (!patch.includes("+  return a + b;") || result.modified.join(",") !== "math.ts")
-    throw new Error("Unexpected exported patch");
-  const apply = await processRun("git", ["-C", repo, "apply", "--check", "-"], { input: patch });
-  if (apply.exitCode !== 0) throw new Error(`Exported patch invalid: ${apply.stderr}`);
-  const events = (await readFile(join(result.artifacts, "events.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((x) => JSON.parse(x));
-  for (const event of ["plan_change", "tool_call", "verification", "checkpoint", "model_result"])
-    if (!events.some((x) => x.type === event)) throw new Error(`Missing trace event ${event}`);
-  const [baseline, weakened, mutated, fixed, ...extra]: Verification[] = events
-    .filter((x) => x.type === "verification")
-    .map((x) => x.data);
-  if (
-    extra.length ||
-    baseline?.repositoryChecks.status !== "failed" ||
-    weakened?.repositoryChecks.status !== "passed" ||
-    weakened.repositoryChecks.changedCandidate ||
-    weakened.trustedAcceptance.status !== "failed" ||
-    mutated?.repositoryChecks.status !== "passed" ||
-    !mutated.repositoryChecks.changedCandidate ||
-    mutated.trustedAcceptance.status !== "failed" ||
-    mutated.trustedAcceptance.fingerprint !== mutated.fingerprint ||
-    fixed?.repositoryChecks.status !== "passed" ||
-    fixed.repositoryChecks.changedCandidate ||
-    fixed.trustedAcceptance.status !== "passed"
-  )
-    throw new Error("Unexpected repository and trusted acceptance evidence");
-  const accepted = result.verification?.trustedAcceptance;
-  if (
-    accepted?.status !== "passed" ||
-    accepted.fingerprint !== fixed.fingerprint ||
-    accepted.patchSha256 !== createHash("sha256").update(patch).digest("hex")
-  )
-    throw new Error("Trusted acceptance does not bind the exported patch");
-  for (const [label, evidence] of [
-    ["weakened-test", weakened],
-    ["verification-mutation", mutated],
-    ["source-fix", fixed],
-  ] as const)
-    console.log(
-      `${label}: repository=${evidence.repositoryChecks.status} candidate-changed=${evidence.repositoryChecks.changedCandidate} trusted=${evidence.trustedAcceptance.status}`,
-    );
-  console.log(
-    JSON.stringify({
-      status: result.status,
-      model: result.model,
-      turns: result.turn,
-      hostUnchanged: true,
-      patchValid: true,
-      trustedAcceptance: accepted,
-      artifacts: result.artifacts,
-    }),
-  );
-} finally {
-  // Keep diagnostics and artifacts for review; only remove the fixture input copy.
-  await rm(repo, { recursive: true, force: true });
+  } finally {
+    await display?.close();
+    process.removeListener("SIGINT", cancel);
+    process.removeListener("SIGTERM", cancel);
+    // Keep diagnostics and artifacts for review; only remove the fixture input copy.
+    await rm(repo, { recursive: true, force: true });
+  }
 }
+await main();

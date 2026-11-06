@@ -39,30 +39,34 @@ export class DockerSandbox implements Sandbox {
       throw new RunError("SANDBOX_ERROR", `Docker operation failed: ${r.stderr.slice(-2000)}`);
     return r;
   }
+  private async createResource(args: string[], signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    // Wait for the daemon to finish creating the resource before cancellation can remove it.
+    this.must(await this.docker(args, { timeoutMs: 10000 }));
+    signal?.throwIfAborted();
+  }
   async initialize(source: string, signal: AbortSignal): Promise<void> {
     this.must(await this.docker(["image", "inspect", this.config.image], { signal }));
     for (const name of [this.workspace, this.control])
-      this.must(await this.docker(["volume", "create", name], { signal }));
+      await this.createResource(["volume", "create", name], signal);
     const name = `minicoder-copy-${randomUUID()}`;
     this.active.add(name);
     try {
-      this.must(
-        await this.docker(
-          [
-            "create",
-            "--name",
-            name,
-            "--network",
-            "none",
-            "--user",
-            "0:0",
-            "--mount",
-            `type=volume,src=${this.workspace},dst=/workspace`,
-            this.config.image,
-            "true",
-          ],
-          { signal },
-        ),
+      await this.createResource(
+        [
+          "create",
+          "--name",
+          name,
+          "--network",
+          "none",
+          "--user",
+          "0:0",
+          "--mount",
+          `type=volume,src=${this.workspace},dst=/workspace`,
+          this.config.image,
+          "true",
+        ],
+        signal,
       );
       this.must(
         await this.docker(["cp", `${source}/.`, `${name}:/workspace`], {
@@ -110,7 +114,7 @@ export class DockerSandbox implements Sandbox {
     const name = `minicoder-exec-${randomUUID()}`;
     this.active.add(name);
     const args = [
-      "run",
+      "create",
       "--rm",
       "-i",
       "--name",
@@ -148,7 +152,8 @@ export class DockerSandbox implements Sandbox {
     if (options.root) args.push("--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN");
     args.push(this.config.image, ...command);
     try {
-      return await this.docker(args, {
+      await this.createResource(args, options.signal);
+      return await this.docker(["start", "-ai", name], {
         signal: options.signal,
         input: options.input,
         timeoutMs: options.timeoutMs ?? this.config.commandTimeoutMs + 10000,
@@ -244,7 +249,7 @@ export class DockerSandbox implements Sandbox {
     const volume = `minicoder-snapshot-${randomUUID()}`;
     this.snapshots.add(volume);
     try {
-      this.must(await this.docker(["volume", "create", volume], { signal }));
+      await this.createResource(["volume", "create", volume], signal);
       // A separate bare repository reads only runtime-owned objects. Override candidate
       // archive and checkout attributes so the snapshot contains the stored Git blobs.
       this.must(

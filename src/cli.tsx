@@ -1,12 +1,11 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util";
-import { type Instance, render } from "ink";
 import { runAgent } from "./agent/orchestrator";
 import { loadConfig } from "./config";
-import { RunView } from "./ui/app";
+import { createRunDisplay } from "./ui/app";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  let ui: Instance | undefined;
+  let ui: ReturnType<typeof createRunDisplay> | undefined;
   const ac = new AbortController();
   const cancel = () => ac.abort();
   try {
@@ -64,6 +63,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.once("SIGTERM", cancel);
     const interactive =
       !parsed.values["non-interactive"] && Boolean(process.stdout.isTTY && process.stdin.isTTY);
+    if (interactive) ui = createRunDisplay(cancel);
     const state = await runAgent({
       repo,
       task,
@@ -71,21 +71,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       artifactRoot: parsed.values["artifact-dir"],
       acceptanceFile: parsed.values["trusted-acceptance"],
       signal: ac.signal,
-      onState: interactive
-        ? (state) => {
-            if (!ui)
-              ui = render(<RunView state={state} cancel={cancel} />, {
-                exitOnCtrlC: false,
-                maxFps: 10,
-              });
-            else ui.rerender(<RunView state={state} cancel={cancel} />);
-          }
-        : undefined,
+      onState: ui?.update,
     });
-    if (ui) {
-      await ui.waitUntilRenderFlush();
-      ui.unmount();
-    } else
+    if (ui) await ui.close();
+    else
       console.log(
         JSON.stringify({
           id: state.id,
@@ -101,7 +90,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       );
     return state.status === "SUCCESS" ? 0 : state.status === "CANCELLED" ? 130 : 1;
   } catch (e) {
-    ui?.unmount();
+    await ui?.close();
     console.error(
       JSON.stringify({ status: "FAILED", message: e instanceof Error ? e.message : "CLI failed" }),
     );

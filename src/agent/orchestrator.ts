@@ -10,6 +10,7 @@ import { loadAcceptance } from "../runtime/acceptance";
 import { Budgets, LoopDetector } from "../runtime/budgets";
 import { Checkpoints } from "../runtime/checkpoints";
 import { Hooks } from "../runtime/hooks";
+import type { ActivityAction, RunProgress } from "../runtime/progress";
 import { RecoveryPolicy } from "../runtime/recovery";
 import { Trace } from "../runtime/trace";
 import { RunError, type RunState, replacePlan, type Status, transition } from "../runtime/types";
@@ -27,7 +28,7 @@ export interface RunOptions {
   artifactRoot?: string;
   acceptanceFile?: string;
   signal?: AbortSignal;
-  onState?: (state: RunState) => void;
+  onState?: (state: RunState, progress: RunProgress) => void;
   hooks?: Hooks;
   // Injectable deterministic model/sandbox seams are for tests, never a CLI host-shell alternative.
   adapters?: ModelAdapter[];
@@ -128,15 +129,42 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
   let ready = false;
   let requested = false;
   let verifier: Verifier;
+  const progress: RunProgress = { waitingForModel: false, entries: [] };
+  const refresh = () => options.onState?.(structuredClone(state), structuredClone(progress));
   const publish = async () => {
     state.elapsedMs = Date.now() - Date.parse(state.startedAt);
     await trace.save(state);
-    options.onState?.(structuredClone(state));
+    refresh();
   };
   const activity = (text: string) => {
     state.activity.push(trace.redact(text));
     state.activity = state.activity.slice(-8);
   };
+  function startActivity(action: ActivityAction, target?: string) {
+    progress.waitingForModel = false;
+    progress.entries.push({
+      action,
+      target: target === undefined ? undefined : trace.redact(target).slice(0, 300),
+      status: "running",
+    });
+    progress.entries = progress.entries.slice(-8);
+  }
+  function finishActivity(action: ActivityAction, failed: boolean, outcome?: string) {
+    const latest = progress.entries.at(-1);
+    if (latest?.action !== action || latest.status !== "running") startActivity(action);
+    const entry = progress.entries.at(-1);
+    if (entry) {
+      entry.status = failed ? "failed" : "done";
+      entry.outcome = outcome === undefined ? undefined : trace.redact(outcome).slice(0, 160);
+    }
+  }
+  async function verify(action: "baseline" | "verification") {
+    startActivity(action);
+    await publish();
+    const result = await verifier.verify(signal);
+    finishActivity(action, !result.passed, result.passed ? "Passed" : result.errors[0]);
+    return result;
+  }
   for (const name of [
     "SessionStart",
     "SessionEnd",
@@ -149,8 +177,11 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       await trace.event(name, data);
     });
   hooks.on("PreToolUse", async (data) => {
-    budget.check(signal);
+    const tool = data.tool as ToolName;
     const args = data.arguments as Record<string, unknown>;
+    const target = args.path ?? args.command ?? args.operation ?? args.pattern ?? args.cwd;
+    startActivity(tool, typeof target === "string" ? target : undefined);
+    budget.check(signal);
     for (const key of ["path", "cwd"])
       if (typeof args[key] === "string") normalizePath("/workspace", args[key]);
     if (data.tool === "run_shell") shellPolicy(String(args.command));
@@ -158,13 +189,29 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
     activity(
       `${data.tool} ${typeof args.path === "string" ? args.path : typeof args.command === "string" ? args.command.slice(0, 120) : ""}`,
     );
+    refresh();
   });
   hooks.on("PostToolUse", async (data) => {
-    const tool = String(data.tool);
+    const tool = data.tool as ToolName;
     state.usage.toolCounts[tool] = (state.usage.toolCounts[tool] ?? 0) + 1;
     await trace.event("tool_result", data);
     if (data.failed) await trace.event("failure", { code: "TOOL_ERROR", tool });
-    const result = data.result as { timedOut?: boolean; omittedBytes?: number };
+    const result = data.result as {
+      timedOut?: boolean;
+      omittedBytes?: number;
+      exitCode?: number;
+      message?: string;
+    };
+    const failed = Boolean(signal.aborted || data.failed || result?.timedOut || result?.exitCode);
+    const outcome =
+      signal.aborted && signal.reason instanceof Error
+        ? signal.reason.message
+        : result?.timedOut
+          ? "Timed out"
+          : typeof result?.exitCode === "number"
+            ? `Exit ${result.exitCode}`
+            : result?.message;
+    finishActivity(tool, failed, outcome);
     if (result?.timedOut) await trace.event("failure", { code: "COMMAND_TIMEOUT", tool });
     if (result?.omittedBytes)
       await trace.event("failure", {
@@ -233,6 +280,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
         state.usage.modelCalls++;
         state.model = String(data.model);
         activity(`model ${state.model}`);
+        progress.waitingForModel = true;
       }
       if (event === "model_fallback") {
         state.usage.fallbackCount++;
@@ -255,6 +303,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
     for (const command of copied.config.bootstrap) {
       budget.check(signal);
       activity(`bootstrap ${command}`);
+      startActivity("bootstrap", command);
       await publish();
       const result = await sandbox.shell(
         command,
@@ -263,6 +312,11 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
         config.bootstrapNetwork,
       );
       await trace.event("bootstrap", { command, result });
+      finishActivity(
+        "bootstrap",
+        result.exitCode !== 0 || result.timedOut,
+        result.timedOut ? "Timed out" : `Exit ${result.exitCode}`,
+      );
       if (result.exitCode !== 0 || result.timedOut)
         throw new RunError("SANDBOX_ERROR", "Bootstrap command failed");
     }
@@ -275,8 +329,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       acceptance,
     );
     activity("verify input baseline");
-    await publish();
-    state.verification = await verifier.verify(signal);
+    state.verification = await verify("baseline");
     if (state.verification.passed)
       await checkpoints.snapshot("validated", signal, state.verification.fingerprint);
     recovery.observe(state.verification, state.checkpoints.validated);
@@ -353,8 +406,7 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       if (requested && !result.failed) {
         transition(state, "VERIFYING");
         activity("runtime verification");
-        await publish();
-        state.verification = await verifier.verify(signal);
+        state.verification = await verify("verification");
         if (state.verification.passed) {
           await checkpoints.snapshot("validated", signal, state.verification.fingerprint);
           budget.check(signal);
@@ -370,9 +422,12 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
           state.checkpoints.validated
         ) {
           const evidence = state.verification;
+          startActivity("recovery");
+          refresh();
           await checkpoints.restore(state.checkpoints.validated, signal);
+          finishActivity("recovery", false, "Restored");
           state.modified = await checkpoints.changed(signal);
-          state.verification = await verifier.verify(signal);
+          state.verification = await verify("verification");
           if (!state.verification.passed)
             throw new RunError("SANDBOX_ERROR", "Restored checkpoint no longer verifies");
           state.usage.recoveryCount++;
@@ -442,6 +497,9 @@ export async function runAgent(options: RunOptions): Promise<RunState> {
       await mcp
         .close()
         .catch((e) => trace.event("cleanup_error", { component: "mcp", message: String(e) }));
+    const interrupted = progress.entries.at(-1);
+    if (interrupted?.status === "running")
+      finishActivity(interrupted.action, true, state.failure?.message);
     // Export partial work even after cancellation, using a fresh bounded cleanup signal.
     const invalidateAcceptance = (message: string) => {
       if (state.verification?.trustedAcceptance.status !== "passed") return;
